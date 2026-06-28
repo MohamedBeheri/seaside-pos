@@ -1,0 +1,19 @@
+{
+  "name": "cafe-pos",
+  "version": "1.0.0",
+  "description": "نظام نقاط بيع وإدارة مخازن لكافيه على البحر — POS + Inventory + Recipes/BOM + Governance",
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "seed": "node db/seed.js",
+    "reset": "node db/seed.js --reset"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.19.2"
+  }
+}

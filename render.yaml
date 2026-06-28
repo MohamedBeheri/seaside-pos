@@ -1,0 +1,19 @@
+# إعداد النشر على Render — https://render.com
+# New + → Blueprint → اختر الريبو → Render يقرأ هذا الملف تلقائياً
+services:
+  - type: web
+    name: cafe-pos
+    runtime: node
+    plan: free
+    region: frankfurt          # الأقرب لمصر
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "24"
+    # لحفظ قاعدة البيانات بشكل دائم (يتطلب خطة مدفوعة):
+    # disk:
+    #   name: data
+    #   mountPath: /opt/render/project/src/db
+    #   sizeGB: 1
