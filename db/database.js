@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-export const DB_PATH = join(__dirname, 'cafe_pos.db');
+export const DB_PATH = process.env.DB_PATH || join(__dirname, 'cafe_pos.db');
 
 export const db = new DatabaseSync(DB_PATH);
 db.exec('PRAGMA foreign_keys = ON;');

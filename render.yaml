@@ -1,19 +1,23 @@
-# إعداد النشر على Render — https://render.com
-# New + → Blueprint → اختر الريبو → Render يقرأ هذا الملف تلقائياً
+# ===================================================================
+#  إعداد النشر الرسمي — Render Starter Plan + Persistent Disk
+#  قاعدة البيانات محفوظة على قرص دائم (لا تُمسح بالنشر)
+# ===================================================================
 services:
   - type: web
-    name: cafe-pos
+    name: seaside-pos
     runtime: node
-    plan: free
-    region: frankfurt          # الأقرب لمصر
+    plan: starter                 # $7/شهر — شغّال ٢٤ ساعة بدون نوم
+    region: frankfurt              # الأقرب لمصر
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/health
+    autoDeploy: true               # ينشر تلقائياً مع كل push على main
     envVars:
       - key: NODE_VERSION
         value: "24"
-    # لحفظ قاعدة البيانات بشكل دائم (يتطلب خطة مدفوعة):
-    # disk:
-    #   name: data
-    #   mountPath: /opt/render/project/src/db
-    #   sizeGB: 1
+      - key: DB_PATH
+        value: /data/cafe_pos.db
+    disk:
+      name: seaside-data
+      mountPath: /data
+      sizeGB: 1                    # 1 جيجا كافي لسنوات من البيانات
