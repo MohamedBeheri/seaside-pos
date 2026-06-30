@@ -1,6 +1,8 @@
 // ===================================================================
 //  واجهة seaside — POS + مخازن + وصفات + حوكمة (ثنائي اللغة + ثيم)
 // ===================================================================
+const APP_BUILD = '2026-06-30.4';
+console.log('seaside POS — build ' + APP_BUILD);
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const root = $('#root');
@@ -163,6 +165,7 @@ function renderLogin() {
       <button class="btn btn-primary btn-block btn-lg" type="submit">${t('دخول')}</button>
       <div class="err" id="le"></div>
     </form>
+    <div class="build-tag">v${APP_BUILD}</div>
   </div></div>`;
   $('#lg-lang').onclick = () => setLang(LANG === 'en' ? 'ar' : 'en');
   $('#lg-theme').onclick = () => setTheme(THEME === 'dark' ? 'light' : 'dark');
@@ -218,6 +221,7 @@ function renderShell() {
         <div class="sb-toggles"><button id="sb-lang">${LANG === 'en' ? 'العربية' : 'English'}</button><button id="sb-theme">${THEME === 'dark' ? '☀️ Light' : '🌙 Dark'}</button></div>
         <div class="u"><div class="av">${esc((ME.full_name || '?')[0])}</div><div><div class="nm">${esc(ME.full_name)}</div><div class="rl">${esc(ME.role_name)}</div></div></div>
         <a class="logout" id="logout">↩ ${t('تسجيل الخروج')}</a>
+        <div class="build-tag sb">v${APP_BUILD}</div>
       </div>
     </aside>
     <main class="main" id="view"><div class="loading">…</div></main></div>`;
@@ -526,20 +530,31 @@ function receiptHTML(o) {
       ${o.payment_kind === 'cash' && o.change_due ? `<tr><td>Change</td><td></td><td style="text-align:right">${em(o.change_due)}</td></tr>` : ''}
     </table>
     <div class="r-line"></div>
-    <div class="r-c" style="font-size:11px">${F.ref !== 0 ? `Ref: ${esc(o.invoice_no)}-${o.id}<br>` : ''}${F.footer !== 0 ? esc(s.receipt_footer || 'Thank you for your visit!') : ''}</div>
+    ${F.barcode !== 0 ? `<div class="r-c r-barcode-wrap"><svg id="r-barcode"></svg></div>` : ''}
+    <div class="r-c r-footer">${F.ref !== 0 ? `Ref: ${esc(o.invoice_no)}-${o.id}<br>` : ''}${F.footer !== 0 ? esc(s.receipt_footer || 'Thank you for your visit!') : ''}</div>
   </div>`;
 }
 function setPrintPage(css) { const s = $('#print-page-style'); if (s) s.textContent = css; }
+function renderReceiptBarcode(o) {
+  const el = document.getElementById('r-barcode');
+  if (!el || typeof JsBarcode === 'undefined') return;
+  try { JsBarcode(el, o.invoice_no, { format: 'CODE128', lineColor: '#000', width: 1.4, height: 34, fontSize: 11, margin: 0, textMargin: 4 }); } catch (e) { /* تجاهل لو فشلت المكتبة */ }
+}
+// أغلب درايفرات الطابعات الحرارية 80mm تعرض مقاسات ورق ثابتة فقط (50/60/80/100/130/150/180/200/230/250/270/297mm)
+// ولا تقبل أي طول حر، فنقرّب لأقرب مقاس قياسي أكبر من ارتفاع الفاتورة بدل رقم عشوائي قد يُرفض أو يُهمَل
+const THERMAL_HEIGHTS_MM = [50, 60, 80, 100, 130, 150, 180, 200, 230, 250, 270, 297, 350, 420, 500];
+function roundToStandardHeight(mm) { return THERMAL_HEIGHTS_MM.find(h => h >= mm) || (Math.ceil(mm / 50) * 50); }
 function printReceipt(o) {
   const pa = $('#print-area'); pa.innerHTML = receiptHTML(o); pa.classList.remove('hidden');
+  renderReceiptBarcode(o);
   // المتصفح لا يدعم "auto" لطول الصفحة بشكل موثوق (يرجع لطول A4 ‎297mm‏ ويقسّم الفاتورة على عدة صفحات)،
-  // لذلك نحسب ارتفاع الفاتورة الفعلي بالميليمتر ونحدده صراحةً كحجم صفحة واحدة بالظبط.
+  // لذلك نحسب ارتفاع الفاتورة الفعلي بعد رسم الباركود، ونقرّبه لأقرب مقاس قياسي يدعمه درايفر الطابعة.
   const receiptEl = pa.querySelector('.receipt');
   const heightPx = receiptEl ? receiptEl.offsetHeight : 600;
-  const heightMM = Math.ceil(heightPx * 25.4 / 96) + 15; // + هامش أمان
+  const heightMM = roundToStandardHeight(Math.ceil(heightPx * 25.4 / 96) + 12);
   setPrintPage(`@page{size:80mm ${heightMM}mm;margin:0}`);
   const done = () => { pa.classList.add('hidden'); pa.innerHTML = ''; setPrintPage(''); window.removeEventListener('afterprint', done); };
-  window.addEventListener('afterprint', done); setTimeout(() => window.print(), 120);
+  window.addEventListener('afterprint', done); setTimeout(() => window.print(), 150);
 }
 
 // ===================================================================
@@ -1292,7 +1307,7 @@ ROUTES.config = async (view) => {
     await api('/settings', { method: 'PUT', body }); META = await api('/meta'); toast(t('حُفظت الإعدادات ✅')); renderShell(); route();
   };
   // ---- بناء الفاتورة الديناميكي ----
-  const RFIELDS = [['logo', 'اللوجو', 'Logo'], ['tagline', 'الوصف', 'Tagline'], ['address', 'العنوان', 'Address'], ['phone', 'الهاتف', 'Phone'], ['datetime', 'التاريخ والوقت', 'Date & time'], ['order_no', 'رقم الطلب', 'Order no.'], ['token', 'رقم التوكن', 'Token'], ['order_type', 'نوع الطلب', 'Order type'], ['table', 'الطاولة', 'Table'], ['cashier', 'الكاشير', 'Cashier'], ['waiter', 'النادل', 'Waiter'], ['footer', 'تذييل الفاتورة', 'Footer'], ['ref', 'مرجع الفاتورة', 'Ref']];
+  const RFIELDS = [['logo', 'اللوجو', 'Logo'], ['tagline', 'الوصف', 'Tagline'], ['address', 'العنوان', 'Address'], ['phone', 'الهاتف', 'Phone'], ['datetime', 'التاريخ والوقت', 'Date & time'], ['order_no', 'رقم الطلب', 'Order no.'], ['token', 'رقم التوكن', 'Token'], ['order_type', 'نوع الطلب', 'Order type'], ['table', 'الطاولة', 'Table'], ['cashier', 'الكاشير', 'Cashier'], ['waiter', 'النادل', 'Waiter'], ['barcode', 'الباركود', 'Barcode'], ['footer', 'تذييل الفاتورة', 'Footer'], ['ref', 'مرجع الفاتورة', 'Ref']];
   let RF = {}; try { RF = JSON.parse(s.receipt_fields || '{}'); } catch { RF = {}; }
   $('#rfields').innerHTML = RFIELDS.map(f => `<label class="rfield"><input type="checkbox" data-rf="${f[0]}" ${RF[f[0]] !== 0 ? 'checked' : ''}> ${L(f[1], f[2])}</label>`).join('');
   $('#rf-save').onclick = async () => {

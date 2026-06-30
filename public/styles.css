@@ -314,20 +314,26 @@ tbody tr{transition:.12s}tbody tr:hover{background:var(--surface2)}
 .bar>span.low{background:var(--red)}.bar>span.mid{background:var(--amber)}
 
 /* ---------- طباعة الفاتورة ---------- */
-.receipt{font-family:'Inter','IBM Plex Sans Arabic',sans-serif;width:300px;margin:0 auto;color:#000;font-size:13px;direction:ltr;text-align:left}
+.receipt{font-family:'Inter','IBM Plex Sans Arabic',sans-serif;width:300px;margin:0 auto;color:#000;font-size:13px;direction:ltr;text-align:left;line-height:1.45}
 .receipt .r-c{text-align:center}
-.receipt .r-logo-img{width:140px;height:auto;margin:0 auto 8px;display:block}
-.receipt h2{font-size:20px;margin:2px 0;font-family:var(--serif);letter-spacing:2px}
-.receipt .r-line{border-top:1px dashed #999;margin:8px 0}
-.receipt table{width:100%;font-size:12.5px}.receipt td{padding:3px 0;border:none}
-.receipt .r-tot td{font-weight:800;font-size:14px}
+.receipt .r-logo-img{width:130px;height:auto;margin:0 auto 6px;display:block}
+.receipt h2{font-size:19px;margin:2px 0;font-family:var(--serif);letter-spacing:3px;font-weight:700}
+.receipt .r-line{border-top:1px dashed #999;margin:9px 0}
+.receipt table{width:100%;font-size:12.5px;border-collapse:collapse}.receipt td{padding:3.5px 0;border:none;vertical-align:top}
+.receipt .r-tot td{font-weight:800;font-size:15px;border-top:1.5px solid #000;padding-top:6px}
+.receipt .r-barcode-wrap{margin:6px 0 2px}
+.receipt .r-barcode-wrap svg{max-width:100%}
+.receipt .r-footer{font-size:11px;line-height:1.6;margin-top:4px;color:#222}
 @media print{
   body *{visibility:hidden}
   #print-area,#print-area *{visibility:visible}
   #print-area{position:absolute;inset:0;padding:0}
-  #print-area .receipt{width:74mm;padding:3mm 0}
+  #print-area .receipt{width:74mm;padding:3mm 0 6mm}
   #print-area .report-doc{width:100%;padding:0}
 }
+/* شارة رقم النسخة — للتأكد من وصول آخر تحديث */
+.build-tag{margin-top:14px;font-size:10.5px;color:var(--text3);letter-spacing:.5px;text-align:center;opacity:.6}
+.build-tag.sb{color:rgba(255,255,255,.45);margin-top:8px}
 
 @media(max-width:900px){
   .app{grid-template-columns:1fr}.sidebar{position:fixed;z-index:50;width:248px;transform:translateX(110%);transition:.2s}

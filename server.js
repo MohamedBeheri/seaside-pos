@@ -825,7 +825,7 @@ app.put('/api/staff/:id', auth, admin, (req, res) => {
   res.json({ ok: true });
 });
 
-// ملفات ثابتة + SPA
-app.use(express.static(join(__dirname, 'public')));
-app.get('*', (_q, res) => res.sendFile(join(__dirname, 'public', 'index.html')));
+// ملفات ثابتة + SPA — بدون كاش طويل عشان أي تحديث يوصل فوراً بدون كاش قديم في المتصفح
+app.use(express.static(join(__dirname, 'public'), { etag: true, lastModified: true, setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
+app.get('*', (_q, res) => { res.setHeader('Cache-Control', 'no-cache'); res.sendFile(join(__dirname, 'public', 'index.html')); });
 app.listen(PORT, () => console.log(`\n🌊 نظام كافيه على البحر يعمل على:  http://localhost:${PORT}\n`));
