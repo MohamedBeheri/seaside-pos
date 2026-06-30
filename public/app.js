@@ -532,7 +532,12 @@ function receiptHTML(o) {
 function setPrintPage(css) { const s = $('#print-page-style'); if (s) s.textContent = css; }
 function printReceipt(o) {
   const pa = $('#print-area'); pa.innerHTML = receiptHTML(o); pa.classList.remove('hidden');
-  setPrintPage('@page{size:80mm auto;margin:0}');
+  // المتصفح لا يدعم "auto" لطول الصفحة بشكل موثوق (يرجع لطول A4 ‎297mm‏ ويقسّم الفاتورة على عدة صفحات)،
+  // لذلك نحسب ارتفاع الفاتورة الفعلي بالميليمتر ونحدده صراحةً كحجم صفحة واحدة بالظبط.
+  const receiptEl = pa.querySelector('.receipt');
+  const heightPx = receiptEl ? receiptEl.offsetHeight : 600;
+  const heightMM = Math.ceil(heightPx * 25.4 / 96) + 15; // + هامش أمان
+  setPrintPage(`@page{size:80mm ${heightMM}mm;margin:0}`);
   const done = () => { pa.classList.add('hidden'); pa.innerHTML = ''; setPrintPage(''); window.removeEventListener('afterprint', done); };
   window.addEventListener('afterprint', done); setTimeout(() => window.print(), 120);
 }
