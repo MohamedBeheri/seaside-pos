@@ -529,9 +529,11 @@ function receiptHTML(o) {
     <div class="r-c" style="font-size:11px">${F.ref !== 0 ? `Ref: ${esc(o.invoice_no)}-${o.id}<br>` : ''}${F.footer !== 0 ? esc(s.receipt_footer || 'Thank you for your visit!') : ''}</div>
   </div>`;
 }
+function setPrintPage(css) { const s = $('#print-page-style'); if (s) s.textContent = css; }
 function printReceipt(o) {
   const pa = $('#print-area'); pa.innerHTML = receiptHTML(o); pa.classList.remove('hidden');
-  const done = () => { pa.classList.add('hidden'); pa.innerHTML = ''; window.removeEventListener('afterprint', done); };
+  setPrintPage('@page{size:80mm auto;margin:0}');
+  const done = () => { pa.classList.add('hidden'); pa.innerHTML = ''; setPrintPage(''); window.removeEventListener('afterprint', done); };
   window.addEventListener('afterprint', done); setTimeout(() => window.print(), 120);
 }
 
@@ -541,26 +543,30 @@ function printReceipt(o) {
 ROUTES.orders = async (view) => {
   view.innerHTML = `<div class="page-head"><div><h2>📋 ${t('الطلبات والفواتير')}</h2><div class="crumb">${t('سجل كل الطلبات مع إمكانية الفلترة')}</div></div></div>
     <div class="toolbar">
+      <input type="search" id="o-search" placeholder="${L('🔍 بحث برقم الفاتورة أو الطاولة…', '🔍 Search by invoice no. or table…')}" style="min-width:230px">
       <input type="date" id="o-date" value="${todayStr()}">
       <select id="o-status"><option value="">${t('كل الحالات')}</option>${['open', 'confirmed', 'paid', 'cancelled'].map(s => `<option value="${s}">${LL(STATUS, s)}</option>`).join('')}</select>
       <select id="o-type"><option value="">${t('كل الأنواع')}</option>${Object.keys(TYPE).map(k => `<option value="${k}">${LL(TYPE, k)}</option>`).join('')}</select>
       <button class="btn btn-ghost btn-sm" id="o-clear">${t('مسح الفلتر')}</button>
     </div><div id="o-list"></div>`;
+  let searchTimer = null;
   const load = async () => {
     const q = new URLSearchParams();
-    if ($('#o-date').value) q.set('date', $('#o-date').value);
+    const query = $('#o-search').value.trim();
+    if (query) q.set('q', query); else if ($('#o-date').value) q.set('date', $('#o-date').value);
     if ($('#o-status').value) q.set('status', $('#o-status').value);
     if ($('#o-type').value) q.set('type', $('#o-type').value);
     const rows = await api('/orders?' + q);
     $('#o-list').innerHTML = `<div class="card"><div class="t-wrap"><table><thead><tr><th>${t('الفاتورة')}</th><th>${t('النوع')}</th><th>${t('الطاولة')}</th><th>${t('الإجمالي')}</th><th>${t('الدفع')}</th><th>${t('الحالة')}</th><th>${t('الوقت')}</th><th></th></tr></thead><tbody>
       ${rows.map(o => `<tr><td>${esc(o.invoice_no || '#' + o.id)}</td><td>${LL(TYPE, o.order_type)}</td><td>${esc(o.table_name || '—')}</td>
         <td class="t-num">${money(o.total)}</td><td>${esc(o.payment_name || '—')}</td><td>${stBadge(o.status)}</td><td style="color:var(--text3)">${dt(o.created_at)}</td>
-        <td><button class="btn btn-ghost btn-sm" data-o="${o.id}">${t('عرض')}</button></td></tr>`).join('') || `<tr><td colspan="8" class="empty">${t('لا طلبات بهذا الفلتر')}</td></tr>`}
+        <td><button class="btn btn-ghost btn-sm" data-o="${o.id}">${t('عرض')}</button></td></tr>`).join('') || `<tr><td colspan="8" class="empty">${query ? L('لا نتائج لبحثك', 'No results for your search') : t('لا طلبات بهذا الفلتر')}</td></tr>`}
       </tbody></table></div></div>`;
     $$('#o-list [data-o]').forEach(b => b.onclick = () => openOrder(+b.dataset.o));
   };
   ['o-date', 'o-status', 'o-type'].forEach(id => $('#' + id).onchange = load);
-  $('#o-clear').onclick = () => { $('#o-date').value = ''; $('#o-status').value = ''; $('#o-type').value = ''; load(); };
+  $('#o-search').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(load, 280); };
+  $('#o-clear').onclick = () => { $('#o-search').value = ''; $('#o-date').value = ''; $('#o-status').value = ''; $('#o-type').value = ''; load(); };
   load();
 };
 async function openOrder(id) {
@@ -1109,7 +1115,8 @@ function exportPDF(title, columns, rows, kpis) {
   const kpisHTML = kpis && kpis.length ? `<div class="rd-kpis">${kpis.map(k => `<div><span>${esc(k.lbl)}</span><b>${esc(k.val)}</b></div>`).join('')}</div>` : '';
   const table = `<table class="rd-table"><thead><tr>${columns.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${columns.map(c => `<td>${esc(r[c.key] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
   const pa = $('#print-area'); pa.innerHTML = `<div class="report-doc">${head}${kpisHTML}${table}</div>`; pa.classList.remove('hidden');
-  const done = () => { pa.classList.add('hidden'); pa.innerHTML = ''; window.removeEventListener('afterprint', done); };
+  setPrintPage('@page{size:A4;margin:14mm}');
+  const done = () => { pa.classList.add('hidden'); pa.innerHTML = ''; setPrintPage(''); window.removeEventListener('afterprint', done); };
   window.addEventListener('afterprint', done); setTimeout(() => window.print(), 150);
 }
 

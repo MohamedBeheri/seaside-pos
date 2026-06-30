@@ -268,6 +268,13 @@ app.get('/api/orders', auth, (req, res) => {
   if (req.query.status) { f.push(' AND o.status=?'); p.push(req.query.status); }
   if (req.query.type) { f.push(' AND o.order_type=?'); p.push(req.query.type); }
   if (req.query.date) { f.push(' AND substr(o.created_at,1,10)=?'); p.push(req.query.date); }
+  // بحث ذكي: يتجاهل الشرطات/المسافات ويطابق رقم الفاتورة كاملاً أو جزء منه (مثال: "74" أو "0074" أو "INV-2026-0074")، وكذلك اسم الطاولة أو رقم الطلب
+  if (req.query.q) {
+    const raw = req.query.q.trim();
+    const norm = raw.replace(/[\s-]/g, '').toUpperCase();
+    f.push(` AND (UPPER(REPLACE(REPLACE(o.invoice_no,'-',''),' ','')) LIKE ? OR o.id=? OR t.name_ar LIKE ?)`);
+    p.push('%' + norm + '%', +raw || 0, '%' + raw + '%');
+  }
   res.json(all(`SELECT o.id,o.invoice_no,o.order_type,o.status,o.total,o.created_at,o.guests,
     t.name_ar table_name, pm.name_ar payment_name FROM orders o
     LEFT JOIN tables t ON t.id=o.table_id LEFT JOIN payment_methods pm ON pm.id=o.payment_method_id

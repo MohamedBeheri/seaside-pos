@@ -324,7 +324,9 @@ tbody tr{transition:.12s}tbody tr:hover{background:var(--surface2)}
 @media print{
   body *{visibility:hidden}
   #print-area,#print-area *{visibility:visible}
-  #print-area{position:absolute;inset:0;padding:10px}
+  #print-area{position:absolute;inset:0;padding:0}
+  #print-area .receipt{width:74mm;padding:3mm 0}
+  #print-area .report-doc{width:100%;padding:0}
 }
 
 @media(max-width:900px){
