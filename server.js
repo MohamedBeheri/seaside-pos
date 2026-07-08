@@ -7,7 +7,9 @@ import bcrypt from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { createReadStream } from 'node:fs';
 import { db, get, all, run, tx, nowISO } from './db/database.js';
+import { DB_PATH } from './db/database.js';
 import { seed } from './db/seed.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -837,6 +839,13 @@ app.put('/api/staff/:id', auth, admin, (req, res) => {
     b.full_name ?? a.full_name, b.role_id ?? a.role_id, b.pin ?? a.pin, b.is_active ?? a.is_active, a.id);
   if (b.password) run('UPDATE users SET password_hash=? WHERE id=?', bcrypt.hashSync(b.password, 10), a.id);
   res.json({ ok: true });
+});
+
+// --- مؤقت: تحميل قاعدة البيانات (أدمن فقط) ---
+app.get('/api/download-db', auth, admin, (_req, res) => {
+  res.setHeader('Content-Disposition', 'attachment; filename=cafe_pos.db');
+  res.setHeader('Content-Type', 'application/octet-stream');
+  createReadStream(DB_PATH).pipe(res);
 });
 
 // ملفات ثابتة + SPA — بدون كاش طويل عشان أي تحديث يوصل فوراً بدون كاش قديم في المتصفح
