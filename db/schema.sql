@@ -293,7 +293,182 @@ CREATE TABLE IF NOT EXISTS purchase_requests (
   handled_at   TEXT
 );
 
+-- ===================================================================
+--  الوحدات الجديدة: عملاء / خزينة / سندات / أطراف / مرتجعات / نقاط / ورديات
+-- ===================================================================
+
+-- ---------- العملاء ----------
+CREATE TABLE IF NOT EXISTS customers (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name_ar    TEXT NOT NULL,
+  phone      TEXT,
+  email      TEXT,
+  address    TEXT,
+  notes      TEXT,
+  points     REAL NOT NULL DEFAULT 0,      -- رصيد نقاط الولاء
+  is_active  INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
+-- ---------- الأطراف العامة (غير العملاء/الموردين: جمعية، صديق، شركة...) ----------
+CREATE TABLE IF NOT EXISTS parties (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name_ar    TEXT NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'general',  -- general | other
+  phone      TEXT, address TEXT, notes TEXT,
+  is_active  INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
+-- ---------- الورديات (فتح/تقفيل عهدة الكاشير) ----------
+CREATE TABLE IF NOT EXISTS shifts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES users(id),
+  opening_float REAL NOT NULL DEFAULT 0,   -- العهدة الافتتاحية بالدرج
+  status        TEXT NOT NULL DEFAULT 'open',  -- open | closed
+  expected_cash REAL,                      -- المتوقع بالدرج عند التقفيل (يحسبه الخادم)
+  counted_cash  REAL,                      -- المعدود فعلياً
+  variance      REAL,                      -- المعدود - المتوقع (عجز/زيادة)
+  note          TEXT,
+  close_note    TEXT,
+  closed_by     INTEGER REFERENCES users(id),
+  opened_at     TEXT NOT NULL,
+  closed_at     TEXT
+);
+
+-- ---------- حركة الخزينة (دفتر أستاذ لكل طريقة دفع) ----------
+CREATE TABLE IF NOT EXISTS money_movements (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  method_id  INTEGER NOT NULL REFERENCES payment_methods(id),
+  amount     REAL NOT NULL,                -- موجب = إيداع، سالب = صرف
+  ref_type   TEXT,                         -- order | invoice_payment | purchase | voucher | expense | sales_return | purchase_return | adjust | shift
+  ref_id     INTEGER,
+  note       TEXT,
+  shift_id   INTEGER REFERENCES shifts(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL
+);
+
+-- ---------- سندات القبض والصرف ----------
+CREATE TABLE IF NOT EXISTS vouchers (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  voucher_no TEXT,
+  kind       TEXT NOT NULL,                -- receipt (قبض) | payment (صرف)
+  party_kind TEXT,                         -- customer | supplier | party | other
+  party_id   INTEGER,
+  party_name TEXT,                         -- نسخة الاسم وقت الإنشاء
+  amount     REAL NOT NULL,
+  method_id  INTEGER REFERENCES payment_methods(id),
+  note       TEXT,
+  status     TEXT NOT NULL DEFAULT 'done', -- done | pending | cancelled
+  shift_id   INTEGER REFERENCES shifts(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL
+);
+
+-- ---------- دفعات الفواتير (سداد الآجل: مبيعات ومشتريات) ----------
+CREATE TABLE IF NOT EXISTS invoice_payments (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind       TEXT NOT NULL,                -- sale | purchase
+  invoice_id INTEGER NOT NULL,
+  amount     REAL NOT NULL,
+  method_id  INTEGER REFERENCES payment_methods(id),
+  note       TEXT,
+  shift_id   INTEGER REFERENCES shifts(id),
+  created_by INTEGER REFERENCES users(id),
+  created_at TEXT NOT NULL
+);
+
+-- ---------- مرتجعات المبيعات ----------
+CREATE TABLE IF NOT EXISTS sales_returns (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  return_no   TEXT,
+  order_id    INTEGER REFERENCES orders(id),
+  customer_id INTEGER REFERENCES customers(id),
+  total       REAL NOT NULL DEFAULT 0,
+  method_id   INTEGER REFERENCES payment_methods(id),  -- طريقة رد المبلغ
+  reason      TEXT,
+  restock     INTEGER NOT NULL DEFAULT 1,  -- إرجاع المكونات للمخزن؟
+  shift_id    INTEGER REFERENCES shifts(id),
+  created_by  INTEGER REFERENCES users(id),
+  created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sales_return_items (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  return_id  INTEGER NOT NULL REFERENCES sales_returns(id) ON DELETE CASCADE,
+  product_id INTEGER,
+  name_ar    TEXT NOT NULL,
+  qty        REAL NOT NULL,
+  price      REAL NOT NULL,
+  cost       REAL NOT NULL DEFAULT 0
+);
+
+-- ---------- مرتجعات المشتريات ----------
+CREATE TABLE IF NOT EXISTS purchase_returns (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  return_no   TEXT,
+  purchase_id INTEGER REFERENCES purchases(id),
+  supplier_id INTEGER REFERENCES suppliers(id),
+  total       REAL NOT NULL DEFAULT 0,
+  method_id   INTEGER REFERENCES payment_methods(id),  -- طريقة استرداد المبلغ
+  reason      TEXT,
+  created_by  INTEGER REFERENCES users(id),
+  created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS purchase_return_items (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  return_id   INTEGER NOT NULL REFERENCES purchase_returns(id) ON DELETE CASCADE,
+  material_id INTEGER NOT NULL REFERENCES raw_materials(id),
+  qty         REAL NOT NULL,
+  unit_cost   REAL NOT NULL
+);
+
+-- ---------- الضرائب والرسوم (متعددة: قيمة مضافة / خدمة / ...) ----------
+CREATE TABLE IF NOT EXISTS taxes (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  name_ar         TEXT NOT NULL,               -- ضريبة القيمة المضافة
+  name_en         TEXT,                        -- VAT
+  rate            REAL NOT NULL DEFAULT 0,     -- النسبة %
+  is_active       INTEGER NOT NULL DEFAULT 1,  -- مطبقة على الطلبات الجديدة؟
+  show_on_receipt INTEGER NOT NULL DEFAULT 1,  -- تظهر سطراً في الريسيت؟
+  sort_order      INTEGER NOT NULL DEFAULT 0
+);
+
+-- ---------- أكواد التحقق OTP (تسجيل دخول العميل بالموبايل) ----------
+CREATE TABLE IF NOT EXISTS otp_codes (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  phone      TEXT NOT NULL,
+  code       TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  attempts   INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_otp_phone ON otp_codes(phone);
+
+-- ---------- جلسات العملاء على المتجر ----------
+CREATE TABLE IF NOT EXISTS customer_sessions (
+  token       TEXT PRIMARY KEY,
+  customer_id INTEGER NOT NULL REFERENCES customers(id),
+  created_at  TEXT NOT NULL
+);
+
+-- ---------- سجل نقاط الولاء ----------
+CREATE TABLE IF NOT EXISTS points_log (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  customer_id INTEGER NOT NULL REFERENCES customers(id),
+  points      REAL NOT NULL,               -- موجب = إضافة، سالب = خصم
+  kind        TEXT NOT NULL,               -- earn | redeem | manual_add | manual_remove
+  note        TEXT,
+  ref_type    TEXT, ref_id INTEGER,
+  created_by  INTEGER REFERENCES users(id),
+  created_at  TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
 CREATE INDEX IF NOT EXISTS idx_orderitems_order ON order_items(order_id);
 CREATE INDEX IF NOT EXISTS idx_invtx_material ON inventory_transactions(material_id);
 CREATE INDEX IF NOT EXISTS idx_recipe_product ON product_recipes(product_id);
+CREATE INDEX IF NOT EXISTS idx_mm_method ON money_movements(method_id);
+CREATE INDEX IF NOT EXISTS idx_mm_shift ON money_movements(shift_id);
+CREATE INDEX IF NOT EXISTS idx_points_customer ON points_log(customer_id);
+-- ملاحظة: idx_orders_customer يُنشأ في migrate() بعد إضافة العمود customer_id للقواعد القديمة

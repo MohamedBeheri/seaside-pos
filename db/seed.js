@@ -6,10 +6,111 @@
 import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
-import { db, get, nowISO, DB_PATH } from './database.js';
+import { db, get, all, run, nowISO, DB_PATH } from './database.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// ===================================================================
+//  ترحيل (Migration) — يضيف الأعمدة/الفهارس الجديدة لقاعدة موجودة بأمان
+// ===================================================================
+export function migrate() {
+  const hasCol = (table, col) => all(`PRAGMA table_info(${table})`).some(c => c.name === col);
+  const addCol = (table, col, ddl) => { if (!hasCol(table, col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`); };
+
+  // الطلبات: عميل + آجل/جزئي + وردية + نقاط
+  addCol('orders', 'customer_id',     'INTEGER REFERENCES customers(id)');
+  addCol('orders', 'paid_amount',     'REAL NOT NULL DEFAULT 0');       // المحصَّل فعلاً
+  addCol('orders', 'payment_status',  "TEXT NOT NULL DEFAULT 'paid'"); // paid | partial | credit
+  addCol('orders', 'shift_id',        'INTEGER REFERENCES shifts(id)');
+  addCol('orders', 'points_earned',   'REAL NOT NULL DEFAULT 0');
+  addCol('orders', 'points_used',     'REAL NOT NULL DEFAULT 0');
+  addCol('orders', 'points_discount', 'REAL NOT NULL DEFAULT 0');
+
+  // المشتريات: سداد جزئي/آجل + طريقة دفع
+  addCol('purchases', 'paid_amount',       'REAL NOT NULL DEFAULT 0');
+  addCol('purchases', 'payment_status',    "TEXT NOT NULL DEFAULT 'paid'");
+  addCol('purchases', 'payment_method_id', 'INTEGER REFERENCES payment_methods(id)');
+
+  // المنتجات: SKU وباركود
+  addCol('products', 'sku',     'TEXT');
+  addCol('products', 'barcode', 'TEXT');
+
+  // طرق الدفع: رصيد افتتاحي + بيانات حساب
+  addCol('payment_methods', 'opening_balance', 'REAL NOT NULL DEFAULT 0');
+  addCol('payment_methods', 'account_no',   'TEXT');
+  addCol('payment_methods', 'account_name', 'TEXT');
+
+  // المصروفات: تُصرف من طريقة دفع (خزينة)
+  addCol('expenses', 'method_id', 'INTEGER REFERENCES payment_methods(id)');
+
+  // طلبات QR من الطاولات: رمز لكل طاولة + مصدر الطلب وبيانات الضيف
+  addCol('tables', 'qr_token', 'TEXT');
+  addCol('orders', 'source',   "TEXT NOT NULL DEFAULT 'pos'");   // pos | qr
+  addCol('orders', 'qr_name',  'TEXT');                          // اسم الضيف (اختياري)
+  addCol('orders', 'qr_phone', 'TEXT');
+  addCol('orders', 'qr_address', 'TEXT');                        // عنوان التوصيل (طلبات أونلاين)
+  addCol('orders', 'tax_detail', 'TEXT');                        // تفصيل الضرائب JSON وقت البيع
+
+  // حساب العميل على المتجر: تأكيد الرقم بالـ OTP
+  addCol('customers', 'phone_verified', 'INTEGER NOT NULL DEFAULT 0');
+  // المنتجات: علامات العرض في المتجر (جديد/مميّز)
+  addCol('products', 'is_new', 'INTEGER NOT NULL DEFAULT 0');
+  addCol('products', 'is_featured', 'INTEGER NOT NULL DEFAULT 0');
+  addCol('products', 'show_online', 'INTEGER NOT NULL DEFAULT 1');
+  // التصنيفات: صورة الفئة + إظهارها في المتجر
+  addCol('categories', 'image', 'TEXT');
+  addCol('categories', 'show_online', 'INTEGER NOT NULL DEFAULT 1');
+
+  db.exec('CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)');
+
+  // القيم القديمة: الفواتير المدفوعة سابقاً تعتبر محصلة بالكامل
+  run("UPDATE orders SET paid_amount=total WHERE status='paid' AND paid_amount=0 AND payment_status='paid'");
+  run('UPDATE purchases SET paid_amount=total WHERE paid_amount=0 AND payment_status=\'paid\'');
+
+  // SKU وباركود تلقائيان للمنتجات القديمة
+  all('SELECT id FROM products WHERE sku IS NULL OR barcode IS NULL').forEach(p => {
+    run('UPDATE products SET sku=COALESCE(sku,?), barcode=COALESCE(barcode,?) WHERE id=?',
+      'PRD-' + String(p.id).padStart(6, '0'), String(2000000000000 + p.id), p.id);
+  });
+
+  // رمز QR فريد لكل طاولة قديمة بدون رمز
+  all('SELECT id FROM tables WHERE qr_token IS NULL').forEach(tb => {
+    run('UPDATE tables SET qr_token=? WHERE id=?', randomUUID().replace(/-/g, '').slice(0, 20), tb.id);
+  });
+
+  // الضرائب: ترحيل نسبة tax_rate القديمة إلى جدول الضرائب المتعدد (مرة واحدة)
+  if (get('SELECT COUNT(*) c FROM taxes').c === 0) {
+    const oldRate = +(get("SELECT value FROM settings WHERE key='tax_rate'")?.value || 0);
+    run('INSERT INTO taxes(name_ar,name_en,rate,is_active,show_on_receipt,sort_order) VALUES(?,?,?,?,?,?)',
+      'ضريبة القيمة المضافة', 'VAT', oldRate > 0 ? oldRate : 14, oldRate > 0 ? 1 : 0, 1, 0);
+    run('INSERT INTO taxes(name_ar,name_en,rate,is_active,show_on_receipt,sort_order) VALUES(?,?,?,?,?,?)',
+      'ضريبة الخدمة', 'Service', 12, 0, 1, 1);
+  }
+
+  // إعدادات افتراضية جديدة (لا تمس الموجود)
+  const defs = {
+    points_enabled: '0',          // تفعيل نظام النقاط
+    points_per_currency: '1',     // نقاط لكل 1 وحدة عملة مدفوعة
+    point_value: '0.10',          // قيمة النقطة بالعملة عند الاستبدال
+    points_min_redeem: '10',      // أقل نقاط يمكن استبدالها
+    points_max_discount_pct: '50', // أقصى نسبة خصم بالنقاط من الفاتورة
+    receipt_size: '80mm',         // 80mm | A4
+    barcode_w_mm: '38', barcode_h_mm: '25', barcode_per_row: '2',
+    shift_require: '1',           // إلزام الكاشير بفتح وردية قبل البيع
+    theme_preset: 'seaside',      // seaside | berry | ocean | forest | royal | sunset
+    theme_glass: '0',             // الوضع الشفاف (زجاجي)
+    online_ordering: '1',         // تفعيل الطلب أونلاين (دليفري) من موقع العميل
+    delivery_fee: '20',           // مصاريف التوصيل الافتراضية
+    shop_require_login: '1',      // إلزام العميل بتسجيل الدخول (تأكيد الرقم) قبل الطلب
+    wa_country: '20',             // كود الدولة للواتساب (مصر)
+    shop_hero_title: 'أطلب دلوقتي أونلاين',
+    shop_hero_sub: 'أشهى المنتجات توصلك لحد باب البيت',
+  };
+  const ins = db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)');
+  Object.entries(defs).forEach(([k, v]) => ins.run(k, v));
+}
 
 // يبني الـ Schema (idempotent) ويعبّئ البيانات الأولية مرة واحدة.
 export function seed({ verbose = false } = {}) {
