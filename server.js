@@ -34,6 +34,12 @@ function auth(req, res, next) {
 const requireRole = (...keys) => (req, res, next) =>
   keys.includes(req.user.role_key) ? next() : res.status(403).json({ error: 'هذا الإجراء غير متاح لدورك' });
 const admin = requireRole('admin');
+const perm = (p) => (req, res, next) => {
+  if (req.user.role_key === 'admin') return next();
+  const perms = JSON.parse(get('SELECT permissions FROM roles WHERE id=?', req.user.role_id)?.permissions || '[]');
+  if (perms.includes(p)) return next();
+  res.status(403).json({ error: 'هذا الإجراء غير متاح لدورك' });
+};
 // إشعار: لمستخدم محدد أو لكل من يحمل دوراً معيناً
 function notify({ user_id = null, role_key = null, type = 'system', icon = '🔔', title, body = null, ref_type = null, ref_id = null }) {
   run('INSERT INTO notifications(user_id,role_key,type,icon,title,body,ref_type,ref_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
@@ -199,7 +205,7 @@ app.post('/api/login', (req, res) => {
   run('INSERT INTO sessions(token,user_id,created_at) VALUES(?,?,?)', token, u.id, nowISO());
   res.json({ token, user: me(u.id) });
 });
-const me = (id) => get(`SELECT u.id,u.full_name,u.email,u.pin,r.key role_key,r.name_ar role_name FROM users u JOIN roles r ON r.id=u.role_id WHERE u.id=?`, id);
+const me = (id) => { const u = get(`SELECT u.id,u.full_name,u.email,u.pin,r.key role_key,r.name_ar role_name,r.permissions FROM users u JOIN roles r ON r.id=u.role_id WHERE u.id=?`, id); if (u) u.permissions = JSON.parse(u.permissions || '[]'); return u; };
 app.post('/api/logout', auth, (req, res) => { run('DELETE FROM sessions WHERE token=?', (req.headers.authorization || '').replace('Bearer ', '')); res.json({ ok: true }); });
 app.get('/api/me', auth, (req, res) => res.json(me(req.user.id)));
 
@@ -458,7 +464,7 @@ app.get('/api/orders/:id', auth, (req, res) => {
 });
 
 // حذف فاتورة نهائياً (أدمن فقط)
-app.delete('/api/orders/:id', auth, admin, (req, res) => {
+app.delete('/api/orders/:id', auth, perm('delete_orders'), (req, res) => {
   const o = get('SELECT * FROM orders WHERE id=?', req.params.id);
   if (!o) return res.status(404).json({ error: 'الطلب غير موجود' });
   tx(() => {
@@ -529,7 +535,7 @@ app.post('/api/orders/:id/settle', auth, (req, res) => {
 app.post('/api/orders/:id/cancel', auth, (req, res) => {
   const o = get('SELECT * FROM orders WHERE id=?', req.params.id);
   if (!o) return res.status(404).json({ error: 'غير موجود' });
-  if (o.status === 'paid' && req.user.role_key !== 'admin') return res.status(400).json({ error: 'لا يمكن إلغاء طلب مدفوع — الأدمن فقط' });
+  if (o.status === 'paid') { const rp = JSON.parse(get('SELECT permissions FROM roles WHERE id=?', req.user.role_id)?.permissions || '[]'); if (req.user.role_key !== 'admin' && !rp.includes('edit_orders')) return res.status(400).json({ error: 'لا يمكن إلغاء طلب مدفوع — تحتاج صلاحية تعديل الفواتير' }); }
   tx(() => {
     if (o.status === 'paid') {
       restockOrder(o.id);   // أدمن يلغي فاتورة مدفوعة → إرجاع المخزون
@@ -547,7 +553,7 @@ app.post('/api/orders/:id/cancel', auth, (req, res) => {
 });
 
 // تعديل فاتورة مدفوعة — الأدمن فقط (يعكس المخزون القديم ويطبّق الجديد)
-app.put('/api/orders/:id', auth, admin, (req, res) => {
+app.put('/api/orders/:id', auth, perm('edit_orders'), (req, res) => {
   const o = get('SELECT * FROM orders WHERE id=?', req.params.id);
   if (!o) return res.status(404).json({ error: 'الطلب غير موجود' });
   if (o.status === 'cancelled') return res.status(400).json({ error: 'الطلب ملغي' });
@@ -2118,7 +2124,22 @@ app.delete('/api/branding/logo', auth, admin, (req, res) => {
 // ===================================================================
 app.get('/api/staff', auth, admin, (_q, res) => res.json(all(`SELECT u.id,u.full_name,u.email,u.pin,u.is_active,r.key role_key,r.name_ar role_name
   FROM users u JOIN roles r ON r.id=u.role_id ORDER BY u.id`)));
-app.get('/api/roles', auth, admin, (_q, res) => res.json(all('SELECT id,key,name_ar FROM roles ORDER BY id')));
+app.get('/api/roles', auth, admin, (_q, res) => res.json(all('SELECT id,key,name_ar,permissions FROM roles ORDER BY id').map(r => ({ ...r, permissions: JSON.parse(r.permissions || '[]') }))));
+app.post('/api/roles', auth, admin, (req, res) => {
+  const b = req.body || {};
+  if (!b.key || !b.name_ar) return res.status(400).json({ error: 'المفتاح والاسم مطلوبان' });
+  if (get('SELECT 1 v FROM roles WHERE key=?', b.key)) return res.status(400).json({ error: 'المفتاح مستخدم بالفعل' });
+  run('INSERT INTO roles(key,name_ar,permissions) VALUES(?,?,?)', b.key, b.name_ar, JSON.stringify(b.permissions || []));
+  res.json({ ok: true });
+});
+app.put('/api/roles/:id', auth, admin, (req, res) => {
+  const r = get('SELECT * FROM roles WHERE id=?', req.params.id);
+  if (!r) return res.status(404).json({ error: 'غير موجود' });
+  if (r.key === 'admin') return res.status(400).json({ error: 'لا يمكن تعديل دور الأدمن' });
+  const b = req.body || {};
+  run('UPDATE roles SET name_ar=?,permissions=? WHERE id=?', b.name_ar ?? r.name_ar, JSON.stringify(b.permissions || JSON.parse(r.permissions || '[]')), r.id);
+  res.json({ ok: true });
+});
 app.post('/api/staff', auth, admin, (req, res) => {
   const b = req.body || {};
   if (!b.full_name || !b.email || !b.password || !b.role_id) return res.status(400).json({ error: 'الاسم والبريد وكلمة المرور والدور مطلوبة' });

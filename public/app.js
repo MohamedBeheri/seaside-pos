@@ -1,7 +1,7 @@
 // ===================================================================
 //  واجهة seaside — POS + مخازن + وصفات + حوكمة (ثنائي اللغة + ثيم)
 // ===================================================================
-const APP_BUILD = '2026-07-02.1';
+const APP_BUILD = '2026-07-09.1';
 console.log('seaside POS — build ' + APP_BUILD);
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -209,13 +209,13 @@ const NAV = [
   { id: 'staff', ic: '👥', t: 'الموظفون', roles: ['admin'] },
   { id: 'config', ic: '⚙️', t: 'الإعدادات', roles: ['admin'] },
 ];
-const can = (id) => { const n = NAV.find(x => x.id === id); return n && n.roles.includes(ME.role_key); };
-const firstRoute = () => (NAV.find(n => n.id && n.roles.includes(ME.role_key)) || { id: 'pos' }).id;
+const can = (id) => { if (ME.role_key === 'admin') return true; return (ME.permissions || []).includes(id); };
+const firstRoute = () => (NAV.find(n => n.id && can(n.id)) || { id: 'pos' }).id;
 
 function renderShell() {
   const items = NAV.map(n => {
     if (n.sec) return `<div class="sec">${t(n.sec)}</div>`;
-    if (!n.roles.includes(ME.role_key)) return '';
+    if (!can(n.id)) return '';
     return `<a href="#/${n.id}" data-r="${n.id}"><span class="ic">${n.ic}</span> ${t(n.t)}<span class="badge hidden" id="badge-${n.id}"></span></a>`;
   }).join('');
   root.innerHTML = `<div class="app">
@@ -588,7 +588,7 @@ ROUTES.orders = async (view) => {
     $('#o-list').innerHTML = `<div class="card"><div class="t-wrap"><table><thead><tr><th>${t('الفاتورة')}</th><th>${t('النوع')}</th><th>${t('الطاولة')}</th><th>${t('الإجمالي')}</th><th>${t('الدفع')}</th><th>${t('الحالة')}</th><th>${t('الوقت')}</th><th></th></tr></thead><tbody>
       ${rows.map(o => `<tr><td>${esc(o.invoice_no || '#' + o.id)}</td><td>${LL(TYPE, o.order_type)}</td><td>${esc(o.table_name || '—')}</td>
         <td class="t-num">${money(o.total)}</td><td>${esc(o.payment_name || '—')}</td><td>${stBadge(o.status)}</td><td style="color:var(--text3)">${dt(o.created_at)}</td>
-        <td><button class="btn btn-ghost btn-sm" data-o="${o.id}">${t('عرض')}</button>${ME.role_key === 'admin' ? `<button class="btn btn-danger btn-sm" data-del="${o.id}" style="margin-inline-start:4px">${t('حذف')}</button>` : ''}</td></tr>`).join('') || `<tr><td colspan="8" class="empty">${query ? L('لا نتائج لبحثك', 'No results for your search') : t('لا طلبات بهذا الفلتر')}</td></tr>`}
+        <td><button class="btn btn-ghost btn-sm" data-o="${o.id}">${t('عرض')}</button>${can('delete_orders') ? `<button class="btn btn-danger btn-sm" data-del="${o.id}" style="margin-inline-start:4px">${t('حذف')}</button>` : ''}</td></tr>`).join('') || `<tr><td colspan="8" class="empty">${query ? L('لا نتائج لبحثك', 'No results for your search') : t('لا طلبات بهذا الفلتر')}</td></tr>`}
       </tbody></table></div></div>`;
     $$('#o-list [data-o]').forEach(b => b.onclick = () => openOrder(+b.dataset.o));
     $$('#o-list [data-del]').forEach(b => b.onclick = () => confirmDialog(L('هل أنت متأكد من حذف هذه الفاتورة نهائياً؟','Are you sure you want to permanently delete this invoice?'), async () => { await api('/orders/' + b.dataset.del, { method: 'DELETE' }); toast(L('تم حذف الفاتورة','Invoice deleted')); load(); }));
@@ -607,8 +607,8 @@ async function openOrder(id) {
     </tbody></table></div>
     <div class="cost-summary"><div>${t('الإجمالي شامل الضريبة')}</div><div class="big">${money(o.total)}</div></div>
     <div class="modal-actions">
-      ${o.status !== 'cancelled' && (o.status !== 'paid' || ME.role_key === 'admin') ? `<button class="btn btn-danger" id="o-cancel">${t('إلغاء الطلب')}</button>` : ''}
-      ${o.status === 'paid' && ME.role_key === 'admin' ? `<button class="btn btn-sand" id="o-edit">✏️ ${t('تعديل الفاتورة (أدمن)')}</button>` : ''}
+      ${o.status !== 'cancelled' && (o.status !== 'paid' || can('edit_orders')) ? `<button class="btn btn-danger" id="o-cancel">${t('إلغاء الطلب')}</button>` : ''}
+      ${o.status === 'paid' && can('edit_orders') ? `<button class="btn btn-sand" id="o-edit">✏️ ${t('تعديل الفاتورة')}</button>` : ''}
       <button class="btn btn-ghost" id="o-print">${t('🖨️ طباعة')}</button>
       ${o.status !== 'paid' && o.status !== 'cancelled' ? `<button class="btn btn-primary" id="o-pay">${t('💵 دفع')}</button>` : ''}
     </div>`, 'wide');
@@ -731,7 +731,7 @@ async function openPurchaseRequest() {
 // ===================================================================
 const PR_STATUS = { pending: ['قيد الانتظار', 'Pending', 'amber'], fulfilled: ['تم التنفيذ', 'Fulfilled', 'green'], rejected: ['مرفوض', 'Rejected', 'red'] };
 ROUTES.requests = async (view) => {
-  const isAdmin = ME.role_key === 'admin';
+  const isAdmin = can('staff');
   const render = async () => {
     const rows = await api('/purchase-requests');
     view.innerHTML = `<div class="page-head"><div><h2>🛒 ${t('طلبات الشراء')}</h2><div class="crumb">${isAdmin ? L('طلبات المطبخ والبار — نفّذها لتحديث المخزون', 'Kitchen & bar requests — fulfill to update stock') : L('طلباتك للمخزن', 'Your stock requests')}</div></div>
@@ -1300,12 +1300,32 @@ ROUTES.reports = async (view) => {
 //  الموظفون
 // ===================================================================
 ROUTES.staff = async (view) => {
+  const ALL_PERMS = [
+    { g: L('الشاشات','Screens'), items: [
+      { k: 'pos', l: L('نقطة البيع','POS') }, { k: 'orders', l: L('الطلبات','Orders') }, { k: 'requests', l: L('طلبات الشراء','Purchase Requests') },
+      { k: 'notifications', l: L('الإشعارات','Notifications') }, { k: 'inventory', l: L('المخزون','Inventory') }, { k: 'purchases', l: L('المشتريات','Purchases') },
+      { k: 'waste', l: L('التوالف','Waste') }, { k: 'stockcount', l: L('الجرد','Stock Count') }, { k: 'dashboard', l: L('لوحة المعلومات','Dashboard') },
+      { k: 'products', l: L('الأصناف','Products') }, { k: 'expenses', l: L('المصروفات','Expenses') }, { k: 'reports', l: L('التقارير','Reports') },
+      { k: 'staff', l: L('الموظفون','Staff') }, { k: 'config', l: L('الإعدادات','Settings') },
+    ]},
+    { g: L('إجراءات','Actions'), items: [
+      { k: 'delete_orders', l: L('حذف الفواتير','Delete Invoices') }, { k: 'edit_orders', l: L('تعديل الفواتير','Edit Invoices') },
+      { k: 'reset_financials', l: L('مسح السجلات المالية','Reset Financial Records') },
+    ]},
+  ];
   const [staff, roles] = await Promise.all([api('/staff'), api('/roles')]);
   view.innerHTML = `<div class="page-head"><div><h2>👥 ${t('الموظفون')}</h2><div class="crumb">${t('إضافة الموظفين وتحديد أدوارهم وصلاحياتهم')}</div></div>
     <div class="head-actions"><button class="btn btn-primary" id="s-new">${t('+ موظف جديد')}</button></div></div>
     <div class="card"><div class="t-wrap"><table><thead><tr><th>${t('الاسم')}</th><th>${t('البريد')}</th><th>${t('الدور')}</th><th>PIN</th><th>${t('الحالة')}</th><th></th></tr></thead><tbody>
     ${staff.map(u => `<tr><td><b>${esc(u.full_name)}</b></td><td style="color:var(--text2)">${esc(u.email)}</td><td><span class="chip">${esc(u.role_name)}</span></td><td>${esc(u.pin || '—')}</td><td>${u.is_active ? `<span class="chip ok">${t('مفعّل')}</span>` : `<span class="chip low">${t('موقوف')}</span>`}</td><td><button class="btn btn-ghost btn-sm" data-u="${u.id}">${t('تعديل')}</button></td></tr>`).join('')}
-    </tbody></table></div></div>`;
+    </tbody></table></div></div>
+    <div class="card" style="margin-top:16px"><h3>🔑 ${L('الأدوار والصلاحيات','Roles & Permissions')}</h3>
+      <p class="crumb" style="margin-bottom:12px">${L('أضف أدواراً جديدة وحدّد صلاحيات كل دور. الأدمن يملك كل الصلاحيات تلقائياً.','Add new roles and set permissions. Admin has all permissions by default.')}</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+        ${roles.map(r => `<button class="btn ${r.key === 'admin' ? 'btn-ghost' : 'btn-sand'} btn-sm" data-r="${r.id}">${esc(r.name_ar)} ${r.key === 'admin' ? '👑' : '✏️'}</button>`).join('')}
+        <button class="btn btn-primary btn-sm" id="r-new">+ ${L('دور جديد','New Role')}</button>
+      </div>
+    </div>`;
   const form = (u) => {
     const m = modal(`<h3>${u ? t('تعديل موظف') : t('موظف جديد')}</h3>
       <div class="field"><label>${t('الاسم')}</label><input id="u-name" value="${esc(u?.full_name || '')}"></div>
@@ -1324,8 +1344,32 @@ ROUTES.staff = async (view) => {
       try { await api(u ? '/staff/' + u.id : '/staff', { method: u ? 'PUT' : 'POST', body }); m.remove(); toast(t('تم الحفظ ✅')); route(); } catch (e) { $('#ue', m).textContent = e.message; }
     };
   };
+  const roleForm = (r) => {
+    const isNew = !r;
+    const perms = r?.permissions || [];
+    const m = modal(`<h3>${isNew ? L('دور جديد','New Role') : L('تعديل دور: ','Edit Role: ') + esc(r.name_ar)}</h3>
+      <div class="row"><div class="field"><label>${L('الاسم','Name')}</label><input id="r-name" value="${esc(r?.name_ar || '')}"></div>
+      <div class="field"><label>${L('المفتاح (إنجليزي)','Key (English)')}</label><input id="r-key" value="${esc(r?.key || '')}" ${isNew ? '' : 'disabled'} placeholder="owner"></div></div>
+      <h4 style="margin:12px 0 8px">${L('الصلاحيات','Permissions')}</h4>
+      ${ALL_PERMS.map(g => `<div style="margin-bottom:12px"><b style="color:var(--text2);font-size:.85rem">${g.g}</b>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:4px 12px;margin-top:4px">
+        ${g.items.map(p => `<label style="display:flex;align-items:center;gap:6px;font-size:.9rem;cursor:pointer"><input type="checkbox" class="rp-cb" value="${p.k}" ${perms.includes(p.k) ? 'checked' : ''} style="width:auto"> ${p.l}</label>`).join('')}
+        </div></div>`).join('')}
+      <div class="err" id="re"></div>
+      <div class="modal-actions"><button class="btn btn-ghost" id="r-x">${t('إلغاء')}</button><button class="btn btn-primary" id="r-save">${t('حفظ')}</button></div>`);
+    $('#r-x', m).onclick = () => m.remove();
+    $('#r-save', m).onclick = async () => {
+      const body = { name_ar: $('#r-name', m).value.trim(), permissions: [...$$('.rp-cb', m)].filter(c => c.checked).map(c => c.value) };
+      if (isNew) body.key = $('#r-key', m).value.trim().toLowerCase().replace(/\s+/g, '_');
+      if (!body.name_ar) return ($('#re', m).textContent = L('الاسم مطلوب','Name is required'));
+      if (isNew && !body.key) return ($('#re', m).textContent = L('المفتاح مطلوب','Key is required'));
+      try { await api(isNew ? '/roles' : '/roles/' + r.id, { method: isNew ? 'POST' : 'PUT', body }); m.remove(); toast(t('تم الحفظ ✅')); route(); } catch (e) { $('#re', m).textContent = e.message; }
+    };
+  };
   $('#s-new').onclick = () => form(null);
   $$('#view [data-u]', view).forEach(b => b.onclick = () => form(staff.find(u => u.id === +b.dataset.u)));
+  $('#r-new').onclick = () => roleForm(null);
+  $$('#view [data-r]', view).forEach(b => { const r = roles.find(x => x.id === +b.dataset.r); if (r?.key !== 'admin') b.onclick = () => roleForm(r); });
 };
 
 // ===================================================================

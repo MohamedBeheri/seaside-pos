@@ -65,6 +65,11 @@ export function migrate() {
 
   db.exec('CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)');
 
+  // الأدوار: عمود الصلاحيات
+  addCol('roles', 'permissions', "TEXT NOT NULL DEFAULT '[]'");
+  const roleDefs = { cashier: ['pos','orders','notifications'], kitchen: ['pos','orders','requests','notifications'], bar: ['pos','orders','requests','notifications'] };
+  Object.entries(roleDefs).forEach(([k, p]) => run("UPDATE roles SET permissions=? WHERE key=? AND permissions='[]'", JSON.stringify(p), k));
+
   // القيم القديمة: الفواتير المدفوعة سابقاً تعتبر محصلة بالكامل
   run("UPDATE orders SET paid_amount=total WHERE status='paid' AND paid_amount=0 AND payment_status='paid'");
   run('UPDATE purchases SET paid_amount=total WHERE paid_amount=0 AND payment_status=\'paid\'');
