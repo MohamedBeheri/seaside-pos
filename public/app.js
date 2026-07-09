@@ -93,6 +93,7 @@ const I18N = {
   '🏷️ التصنيفات': '🏷️ Categories', '🪑 الطاولات': '🪑 Tables', '💳 طرق الدفع': '💳 Payment methods', '📏 الوحدات': '📏 Units', '🏬 المخازن': '🏬 Warehouses', '🚚 الموردون': '🚚 Suppliers',
   'الاسم': 'Name', 'أيقونة': 'Icon', 'لون': 'Color', 'ترتيب': 'Order', 'مقاعد': 'Seats', 'الرمز': 'Symbol', 'هاتف': 'Phone', 'ملاحظات': 'Notes', 'مفعّل': 'Active',
   'تأكيد': 'Confirm', 'لا بيانات': 'No data',
+  'حذف': 'Delete', 'تم حذف الفاتورة': 'Invoice deleted',
   '⚠️ منطقة الخطر': '⚠️ Danger Zone',
   'مسح جميع الفواتير والحركات المالية': 'Delete all invoices & financial records',
   'هذا الإجراء سيحذف جميع الطلبات والفواتير والمشتريات والمصروفات وحركات المخزون والجرد نهائياً. لن يمس المنتجات أو الأصناف أو التصنيفات أو المخزون.': 'This will permanently delete all orders, invoices, purchases, expenses, inventory transactions and stock counts. Products, categories and inventory will NOT be affected.',
@@ -569,7 +570,8 @@ ROUTES.orders = async (view) => {
   view.innerHTML = `<div class="page-head"><div><h2>📋 ${t('الطلبات والفواتير')}</h2><div class="crumb">${t('سجل كل الطلبات مع إمكانية الفلترة')}</div></div></div>
     <div class="toolbar">
       <input type="search" id="o-search" placeholder="${L('🔍 بحث برقم الفاتورة أو الطاولة…', '🔍 Search by invoice no. or table…')}" style="min-width:230px">
-      <input type="date" id="o-date" value="${todayStr()}">
+      <label style="font-size:13px;color:var(--text2)">${L('من','From')}</label><input type="date" id="o-from" value="${todayStr()}">
+      <label style="font-size:13px;color:var(--text2)">${L('إلى','To')}</label><input type="date" id="o-to" value="${todayStr()}">
       <select id="o-status"><option value="">${t('كل الحالات')}</option>${['open', 'confirmed', 'paid', 'cancelled'].map(s => `<option value="${s}">${LL(STATUS, s)}</option>`).join('')}</select>
       <select id="o-type"><option value="">${t('كل الأنواع')}</option>${Object.keys(TYPE).map(k => `<option value="${k}">${LL(TYPE, k)}</option>`).join('')}</select>
       <button class="btn btn-ghost btn-sm" id="o-clear">${t('مسح الفلتر')}</button>
@@ -578,20 +580,22 @@ ROUTES.orders = async (view) => {
   const load = async () => {
     const q = new URLSearchParams();
     const query = $('#o-search').value.trim();
-    if (query) q.set('q', query); else if ($('#o-date').value) q.set('date', $('#o-date').value);
+    if (query) q.set('q', query);
+    else { if ($('#o-from').value) q.set('from', $('#o-from').value); if ($('#o-to').value) q.set('to', $('#o-to').value); }
     if ($('#o-status').value) q.set('status', $('#o-status').value);
     if ($('#o-type').value) q.set('type', $('#o-type').value);
     const rows = await api('/orders?' + q);
     $('#o-list').innerHTML = `<div class="card"><div class="t-wrap"><table><thead><tr><th>${t('الفاتورة')}</th><th>${t('النوع')}</th><th>${t('الطاولة')}</th><th>${t('الإجمالي')}</th><th>${t('الدفع')}</th><th>${t('الحالة')}</th><th>${t('الوقت')}</th><th></th></tr></thead><tbody>
       ${rows.map(o => `<tr><td>${esc(o.invoice_no || '#' + o.id)}</td><td>${LL(TYPE, o.order_type)}</td><td>${esc(o.table_name || '—')}</td>
         <td class="t-num">${money(o.total)}</td><td>${esc(o.payment_name || '—')}</td><td>${stBadge(o.status)}</td><td style="color:var(--text3)">${dt(o.created_at)}</td>
-        <td><button class="btn btn-ghost btn-sm" data-o="${o.id}">${t('عرض')}</button></td></tr>`).join('') || `<tr><td colspan="8" class="empty">${query ? L('لا نتائج لبحثك', 'No results for your search') : t('لا طلبات بهذا الفلتر')}</td></tr>`}
+        <td><button class="btn btn-ghost btn-sm" data-o="${o.id}">${t('عرض')}</button>${ME.role_key === 'admin' ? `<button class="btn btn-danger btn-sm" data-del="${o.id}" style="margin-inline-start:4px">${t('حذف')}</button>` : ''}</td></tr>`).join('') || `<tr><td colspan="8" class="empty">${query ? L('لا نتائج لبحثك', 'No results for your search') : t('لا طلبات بهذا الفلتر')}</td></tr>`}
       </tbody></table></div></div>`;
     $$('#o-list [data-o]').forEach(b => b.onclick = () => openOrder(+b.dataset.o));
+    $$('#o-list [data-del]').forEach(b => b.onclick = () => confirmDialog(L('هل أنت متأكد من حذف هذه الفاتورة نهائياً؟','Are you sure you want to permanently delete this invoice?'), async () => { await api('/orders/' + b.dataset.del, { method: 'DELETE' }); toast(L('تم حذف الفاتورة','Invoice deleted')); load(); }));
   };
-  ['o-date', 'o-status', 'o-type'].forEach(id => $('#' + id).onchange = load);
+  ['o-from', 'o-to', 'o-status', 'o-type'].forEach(id => $('#' + id).onchange = load);
   $('#o-search').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(load, 280); };
-  $('#o-clear').onclick = () => { $('#o-search').value = ''; $('#o-date').value = ''; $('#o-status').value = ''; $('#o-type').value = ''; load(); };
+  $('#o-clear').onclick = () => { $('#o-search').value = ''; $('#o-from').value = ''; $('#o-to').value = ''; $('#o-status').value = ''; $('#o-type').value = ''; load(); };
   load();
 };
 async function openOrder(id) {

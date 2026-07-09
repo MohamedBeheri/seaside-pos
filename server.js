@@ -429,7 +429,10 @@ app.get('/api/orders', auth, (req, res) => {
   const f = [], p = [];
   if (req.query.status) { f.push(' AND o.status=?'); p.push(req.query.status); }
   if (req.query.type) { f.push(' AND o.order_type=?'); p.push(req.query.type); }
-  if (req.query.date) { f.push(' AND substr(o.created_at,1,10)=?'); p.push(req.query.date); }
+  if (req.query.from && req.query.to) { f.push(' AND substr(o.created_at,1,10) BETWEEN ? AND ?'); p.push(req.query.from, req.query.to); }
+  else if (req.query.from) { f.push(' AND substr(o.created_at,1,10)>=?'); p.push(req.query.from); }
+  else if (req.query.to) { f.push(' AND substr(o.created_at,1,10)<=?'); p.push(req.query.to); }
+  else if (req.query.date) { f.push(' AND substr(o.created_at,1,10)=?'); p.push(req.query.date); }
   if (req.query.pay_status) { f.push(' AND o.payment_status=?'); p.push(req.query.pay_status); }
   if (req.query.customer) { f.push(' AND o.customer_id=?'); p.push(req.query.customer); }
   // آجل/جزئي فقط (المتبقي > 0)
@@ -452,6 +455,18 @@ app.get('/api/orders/:id', auth, (req, res) => {
   const o = orderDetail(req.params.id);
   if (!o) return res.status(404).json({ error: 'الطلب غير موجود' });
   res.json(o);
+});
+
+// حذف فاتورة نهائياً (أدمن فقط)
+app.delete('/api/orders/:id', auth, admin, (req, res) => {
+  const o = get('SELECT * FROM orders WHERE id=?', req.params.id);
+  if (!o) return res.status(404).json({ error: 'الطلب غير موجود' });
+  tx(() => {
+    run('DELETE FROM order_items WHERE order_id=?', o.id);
+    run('DELETE FROM orders WHERE id=?', o.id);
+  });
+  logAudit(req.user.id, 'order', o.id, 'delete', { invoice: o.invoice_no });
+  res.json({ ok: true });
 });
 
 // دفع طلب مفتوح/مؤكد (كامل أو جزئي أو آجل على عميل)
