@@ -93,6 +93,11 @@ const I18N = {
   '🏷️ التصنيفات': '🏷️ Categories', '🪑 الطاولات': '🪑 Tables', '💳 طرق الدفع': '💳 Payment methods', '📏 الوحدات': '📏 Units', '🏬 المخازن': '🏬 Warehouses', '🚚 الموردون': '🚚 Suppliers',
   'الاسم': 'Name', 'أيقونة': 'Icon', 'لون': 'Color', 'ترتيب': 'Order', 'مقاعد': 'Seats', 'الرمز': 'Symbol', 'هاتف': 'Phone', 'ملاحظات': 'Notes', 'مفعّل': 'Active',
   'تأكيد': 'Confirm', 'لا بيانات': 'No data',
+  '⚠️ منطقة الخطر': '⚠️ Danger Zone',
+  'مسح جميع الفواتير والحركات المالية': 'Delete all invoices & financial records',
+  'هذا الإجراء سيحذف جميع الطلبات والفواتير والمشتريات والمصروفات وحركات المخزون والجرد نهائياً. لن يمس المنتجات أو الأصناف أو التصنيفات أو المخزون.': 'This will permanently delete all orders, invoices, purchases, expenses, inventory transactions and stock counts. Products, categories and inventory will NOT be affected.',
+  '🗑️ مسح الحركات المالية': '🗑️ Delete Financial Records',
+  'تم مسح جميع الحركات المالية ✅': 'All financial records deleted ✅',
 };
 const loc = () => LANG === 'en' ? 'en-GB' : 'ar-EG';
 const t = (s) => LANG === 'en' ? (I18N[s] ?? s) : s;
@@ -1350,7 +1355,12 @@ ROUTES.config = async (view) => {
     </div>
     <div class="card"><h3>${t('🗂️ القوائم الديناميكية')}</h3>
       <div class="cat-chips" id="adm-tabs">${ADMIN_TABS.map((a, i) => `<button class="cat-chip ${i === 0 ? 'active' : ''}" data-k="${a.k}">${t(a.t)}</button>`).join('')}</div>
-      <div id="adm-body"></div></div>`;
+      <div id="adm-body"></div></div>
+    <div class="card" style="border:2px solid #e53935">
+      <h3 style="color:#e53935">${t('⚠️ منطقة الخطر')}</h3>
+      <p style="margin-bottom:12px">${t('هذا الإجراء سيحذف جميع الطلبات والفواتير والمشتريات والمصروفات وحركات المخزون والجرد نهائياً. لن يمس المنتجات أو الأصناف أو التصنيفات أو المخزون.')}</p>
+      <button class="btn" id="btn-reset-fin" style="background:#e53935;color:#fff">${t('🗑️ مسح الحركات المالية')}</button>
+    </div>`;
   $('#st-save').onclick = async () => {
     const body = {}; ['cafe_name', 'tagline', 'tax_rate', 'currency', 'address', 'phone', 'receipt_footer'].forEach(k => body[k] = $('#st-' + k).value);
     await api('/settings', { method: 'PUT', body }); META = await api('/meta'); toast(t('حُفظت الإعدادات ✅')); renderShell(); route();
@@ -1363,6 +1373,14 @@ ROUTES.config = async (view) => {
     const fields = {}; $$('#rfields [data-rf]').forEach(c => fields[c.dataset.rf] = c.checked ? 1 : 0);
     await api('/settings', { method: 'PUT', body: { receipt_fields: JSON.stringify(fields), receipt_extra_lines: $('#st-extra').value } });
     META = await api('/meta'); toast(L('حُفظت إعدادات الفاتورة ✅', 'Receipt settings saved ✅'));
+  };
+  $('#btn-reset-fin').onclick = async () => {
+    const msg = L('هذا الإجراء لا يمكن التراجع عنه!\nسيحذف كل الفواتير والمشتريات والمصروفات والحركات المالية.\nالمنتجات والتصنيفات والمخزون لن تتأثر.\n\nاكتب "مسح" للتأكيد:', 'This cannot be undone!\nAll orders, purchases, expenses and financial records will be deleted.\nProducts, categories and inventory will NOT be affected.\n\nType "delete" to confirm:');
+    const ans = prompt(msg);
+    if (ans !== 'مسح' && ans !== 'delete') return;
+    if (!confirm(L('⚠️ تأكيد نهائي: هل أنت متأكد من مسح جميع الحركات المالية؟', '⚠️ Final confirmation: Are you sure you want to delete all financial records?'))) return;
+    await api('/admin/reset-financials', { method: 'POST', body: { confirm: 'DELETE_FINANCIALS' } });
+    toast(t('تم مسح جميع الحركات المالية ✅'));
   };
   let curK = ADMIN_TABS[0].k;
   const loadTab = async () => {

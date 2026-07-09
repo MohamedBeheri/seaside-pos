@@ -2121,6 +2121,27 @@ app.put('/api/staff/:id', auth, admin, (req, res) => {
   res.json({ ok: true });
 });
 
+// مسح الفواتير والحركات المالية فقط (أدمن + تأكيد)
+app.post('/api/admin/reset-financials', auth, admin, (req, res) => {
+  if (req.body?.confirm !== 'DELETE_FINANCIALS') return res.status(400).json({ error: 'مطلوب تأكيد العملية' });
+  tx(() => {
+    run('DELETE FROM order_items');
+    run('DELETE FROM orders');
+    run('DELETE FROM purchase_items');
+    run('DELETE FROM purchases');
+    run('DELETE FROM purchase_requests');
+    run('DELETE FROM expenses');
+    run('DELETE FROM inventory_transactions');
+    run('DELETE FROM waste_log');
+    run('DELETE FROM stock_count_items');
+    run('DELETE FROM stock_counts');
+    run('DELETE FROM audit_log');
+    run('DELETE FROM notifications');
+    run("DELETE FROM sqlite_sequence WHERE name IN ('orders','order_items','purchases','purchase_items','expenses','inventory_transactions','waste_log','stock_counts','stock_count_items','audit_log','notifications','purchase_requests')");
+  });
+  logAudit(req.user.id, 'system', 0, 'reset_financials', { by: req.user.email });
+  res.json({ ok: true });
+});
 // ملفات ثابتة + SPA — بدون كاش طويل عشان أي تحديث يوصل فوراً بدون كاش قديم في المتصفح
 app.use(express.static(join(__dirname, 'public'), { etag: true, lastModified: true, setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
 // منيو العميل عبر QR الطاولة (صفحة عامة مستقلة عن نظام الإدارة)
