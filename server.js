@@ -4,7 +4,7 @@
 // ===================================================================
 import express from 'express';
 import bcrypt from 'bcryptjs';
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import { existsSync, mkdirSync, readdirSync, statSync, copyFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -139,7 +139,9 @@ function logPoints(customer_id, points, kind, note, ref_type, ref_id, by) {
 // مولّد أرقام مستندات موحّد: RCP-2026-0001 ...
 function genDocNo(table, col, prefix) {
   const year = nowISO().slice(0, 4);
-  const n = get(`SELECT COUNT(*) c FROM ${table} WHERE ${col} LIKE ?`, `${prefix}-${year}-%`).c + 1;
+  const stem = `${prefix}-${year}-`;
+  const { n } = get(`SELECT COALESCE(MAX(CAST(substr(${col}, ?) AS INTEGER)), 0) + 1 AS n
+    FROM ${table} WHERE ${col} LIKE ?`, stem.length + 1, stem + '%');
   return `${prefix}-${year}-${String(n).padStart(4, '0')}`;
 }
 
@@ -175,19 +177,18 @@ function backflushOrder(orderId) {
 }
 // عكس الخصم (إرجاع المكونات للمخزن) — عند تعديل/إلغاء فاتورة مدفوعة
 function restockOrder(orderId) {
-  const items = all('SELECT oi.*, p.track_stock FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=?', orderId);
+  // Include prior reversals so repeated edits restore only the outstanding movement.
+  const movements = all(`SELECT material_id, warehouse_id, unit_cost, -ROUND(SUM(qty), 4) AS quantity
+    FROM inventory_transactions
+    WHERE ref_type='order' AND ref_id=? AND type IN ('sale', 'adjust')
+    GROUP BY material_id, warehouse_id, unit_cost HAVING ROUND(SUM(qty), 4) <> 0`, orderId);
   const t = nowISO();
-  for (const it of items) {
-    if (!it.product_id || it.track_stock === 0) continue;
-    const recipe = all('SELECT pr.material_id, pr.qty, m.warehouse_id, m.avg_cost FROM product_recipes pr JOIN raw_materials m ON m.id=pr.material_id WHERE pr.product_id=?', it.product_id);
-    for (const r of recipe) {
-      const back = r.qty * it.qty;
-      const mat = get('SELECT qty FROM raw_materials WHERE id=?', r.material_id);
-      const bal = +(mat.qty + back).toFixed(4);
-      run('UPDATE raw_materials SET qty=? WHERE id=?', bal, r.material_id);
-      run(`INSERT INTO inventory_transactions(material_id,warehouse_id,type,qty,unit_cost,balance,ref_type,ref_id,note,created_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?)`, r.material_id, r.warehouse_id, 'adjust', back, r.avg_cost, bal, 'order', orderId, 'إرجاع تعديل فاتورة: ' + it.name_ar, t);
-    }
+  for (const movement of movements) {
+    const { material_id, warehouse_id, unit_cost, quantity } = movement;
+    const { qty: balance } = get('UPDATE raw_materials SET qty=ROUND(qty+?,4) WHERE id=? RETURNING qty', quantity, material_id);
+    run(`INSERT INTO inventory_transactions(material_id,warehouse_id,type,qty,unit_cost,balance,ref_type,ref_id,note,created_at)
+      VALUES(?,?,'adjust',?,?,?,'order',?,?,?)`, material_id, warehouse_id, quantity, unit_cost,
+      balance, orderId, 'عكس حركة مخزون الفاتورة', t);
   }
 }
 
@@ -323,9 +324,7 @@ app.get('/api/pos/products', auth, (_q, res) => {
 });
 
 function genInvoiceNo() {
-  const year = nowISO().slice(0, 4);
-  const n = get("SELECT COUNT(*) c FROM orders WHERE invoice_no LIKE ?", 'INV-' + year + '-%').c + 1;
-  return `INV-${year}-${String(n).padStart(4, '0')}`;
+  return genDocNo('orders', 'invoice_no', 'INV');
 }
 
 // الضرائب المفعّلة (قيمة مضافة / خدمة / ...) — تُحسب كلٌّ منها على الوعاء بعد الخصم
@@ -450,7 +449,7 @@ app.get('/api/orders', auth, (req, res) => {
     f.push(` AND (UPPER(REPLACE(REPLACE(o.invoice_no,'-',''),' ','')) LIKE ? OR o.id=? OR t.name_ar LIKE ? OR c.name_ar LIKE ? OR c.phone LIKE ?)`);
     p.push('%' + norm + '%', +raw || 0, '%' + raw + '%', '%' + raw + '%', '%' + raw + '%');
   }
-  res.json(all(`SELECT o.id,o.invoice_no,o.order_type,o.status,o.total,o.created_at,o.guests,o.source,o.qr_name,
+  res.json(all(`SELECT o.id,o.invoice_no,o.order_type,o.status,o.total,o.created_at,o.paid_at,o.guests,o.source,o.qr_name,
     o.paid_amount,o.payment_status,ROUND(o.total-o.paid_amount,2) remaining,
     t.name_ar table_name, pm.name_ar payment_name, c.name_ar customer_name FROM orders o
     LEFT JOIN tables t ON t.id=o.table_id LEFT JOIN payment_methods pm ON pm.id=o.payment_method_id
@@ -467,6 +466,8 @@ app.get('/api/orders/:id', auth, (req, res) => {
 app.delete('/api/orders/:id', auth, perm('delete_orders'), (req, res) => {
   const o = get('SELECT * FROM orders WHERE id=?', req.params.id);
   if (!o) return res.status(404).json({ error: 'الطلب غير موجود' });
+  if (o.status === 'paid' || o.paid_at)
+    return res.status(409).json({ error: 'يجب الاحتفاظ بالفاتورة التي سُجّل دفعها وبحركاتها' });
   tx(() => {
     run('DELETE FROM order_items WHERE order_id=?', o.id);
     run('DELETE FROM orders WHERE id=?', o.id);
@@ -535,14 +536,21 @@ app.post('/api/orders/:id/settle', auth, (req, res) => {
 app.post('/api/orders/:id/cancel', auth, (req, res) => {
   const o = get('SELECT * FROM orders WHERE id=?', req.params.id);
   if (!o) return res.status(404).json({ error: 'غير موجود' });
+  if (get('SELECT 1 FROM sales_returns WHERE order_id=? LIMIT 1', o.id))
+    return res.status(409).json({ error: 'الفاتورة مرتبطة بمرتجع مبيعات ولا يمكن تعديلها أو إلغاؤها' });
   if (o.status === 'paid') { const rp = JSON.parse(get('SELECT permissions FROM roles WHERE id=?', req.user.role_id)?.permissions || '[]'); if (req.user.role_key !== 'admin' && !rp.includes('edit_orders')) return res.status(400).json({ error: 'لا يمكن إلغاء طلب مدفوع — تحتاج صلاحية تعديل الفواتير' }); }
   tx(() => {
     if (o.status === 'paid') {
       restockOrder(o.id);   // أدمن يلغي فاتورة مدفوعة → إرجاع المخزون
       // عكس الحركة المالية والنقاط
-      if (o.paid_amount > 0 && o.payment_method_id) moneyMove({ method_id: o.payment_method_id, amount: -o.paid_amount,
-        ref_type: 'order', ref_id: o.id, note: `إلغاء فاتورة ${o.invoice_no}`, user_id: req.user.id,
-        shift_id: openShiftOf(req.user.id)?.id || null });
+      const collections = all(`SELECT method_id, ROUND(SUM(amount),2) amount FROM money_movements
+        WHERE ref_id=? AND amount>0 AND ref_type IN ('order','invoice_payment')
+        GROUP BY method_id`, o.id); // Purchase settlements with the same numeric ID are debits.
+      const shiftId = openShiftOf(req.user.id)?.id || null;
+      for (const collection of collections) {
+        moneyMove({ method_id: collection.method_id, amount: -collection.amount, ref_type: 'order',
+          ref_id: o.id, note: `إلغاء فاتورة ${o.invoice_no}`, user_id: req.user.id, shift_id: shiftId });
+      }
       if (o.customer_id && o.points_earned > 0) logPoints(o.customer_id, -o.points_earned, 'manual_remove', 'إلغاء فاتورة', 'order', o.id, req.user.id);
       if (o.customer_id && o.points_used > 0) logPoints(o.customer_id, +o.points_used, 'manual_add', 'إلغاء فاتورة — استرداد نقاط', 'order', o.id, req.user.id);
     }
@@ -556,6 +564,8 @@ app.post('/api/orders/:id/cancel', auth, (req, res) => {
 app.put('/api/orders/:id', auth, perm('edit_orders'), (req, res) => {
   const o = get('SELECT * FROM orders WHERE id=?', req.params.id);
   if (!o) return res.status(404).json({ error: 'الطلب غير موجود' });
+  if (get('SELECT 1 FROM sales_returns WHERE order_id=? LIMIT 1', o.id))
+    return res.status(409).json({ error: 'الفاتورة مرتبطة بمرتجع مبيعات ولا يمكن تعديلها أو إلغاؤها' });
   if (o.status === 'cancelled') return res.status(400).json({ error: 'الطلب ملغي' });
   const b = req.body || {};
   const items = (b.items || []).filter(i => i.product_id && i.qty > 0);
@@ -1772,11 +1782,13 @@ app.get('/api/public/menu', (req, res) => {
 // ===================================================================
 //  حسابات العملاء (المتجر): تسجيل دخول بالموبايل + OTP واتساب
 // ===================================================================
-const genOTP = () => String(Math.floor(1000 + Math.random() * 9000));   // 4 أرقام
+const genOTP = () => String(randomInt(1000, 10000));   // 4 أرقام
 // إرسال كود التحقق
 app.post('/api/shop/otp/send', async (req, res) => {
   const phone = (req.body?.phone || '').trim();
   if (!/^0?1[0-9]{9}$/.test(phone.replace(/\s/g, ''))) return res.status(400).json({ error: 'أدخل رقم موبايل مصري صحيح (11 رقم)' });
+  if (!waConnected() && process.env.NODE_ENV !== 'development')
+    return res.status(503).json({ error: 'خدمة إرسال كود التحقق غير متاحة حالياً' });
   // حد إرسال: كود واحد كل 45 ثانية لنفس الرقم
   const recent = get(`SELECT created_at FROM otp_codes WHERE phone=? ORDER BY id DESC LIMIT 1`, phone);
   if (recent && (Date.now() - new Date(recent.created_at).getTime()) < 45e3)
@@ -1784,9 +1796,13 @@ app.post('/api/shop/otp/send', async (req, res) => {
   const code = genOTP();
   const expires = new Date(Date.now() + 5 * 60e3).toISOString();
   run('DELETE FROM otp_codes WHERE phone=?', phone);   // كود واحد فعّال لكل رقم
-  run('INSERT INTO otp_codes(phone,code,expires_at,created_at) VALUES(?,?,?,?)', phone, code, expires, nowISO());
+  const otpId = run('INSERT INTO otp_codes(phone,code,expires_at,created_at) VALUES(?,?,?,?)', phone, code, expires, nowISO()).lastInsertRowid;
   const s = settingsObj();
   const wa = await sendWhatsApp(phone, `${s.cafe_name || 'المتجر'}\nكود تفعيل حسابك: ${code}\nصالح لمدة 5 دقائق. لا تشاركه مع أحد.`);
+  if (!wa.ok && !wa.dev) {
+    run('DELETE FROM otp_codes WHERE id=?', otpId);
+    return res.status(502).json({ error: 'تعذّر إرسال كود التحقق، حاول مرة أخرى' });
+  }
   if (wa.dev) LAST_DEV_OTP = { phone, code };
   // في وضع التطوير نُرجع الكود ليجربه المطوّر؛ في الإنتاج (واتساب متصل) لا نُرجعه
   res.json({ sent: true, dev: !!wa.dev, ...(wa.dev ? { dev_code: code } : {}) });
@@ -2183,4 +2199,4 @@ app.use(express.static(join(__dirname, 'public'), { etag: true, lastModified: tr
 // منيو العميل عبر QR الطاولة (صفحة عامة مستقلة عن نظام الإدارة)
 app.get('/menu', (_q, res) => { res.setHeader('Cache-Control', 'no-cache'); res.sendFile(join(__dirname, 'public', 'menu.html')); });
 app.get('*', (_q, res) => { res.setHeader('Cache-Control', 'no-cache'); res.sendFile(join(__dirname, 'public', 'index.html')); });
-app.listen(PORT, () => console.log(`\n🌊 نظام كافيه على البحر يعمل على:  http://localhost:${PORT}\n`));
+export const server = app.listen(PORT, () => console.log(`\n🌊 نظام كافيه على البحر يعمل على:  http://localhost:${server.address().port}\n`));
