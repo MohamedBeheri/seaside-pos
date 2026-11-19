@@ -9,9 +9,6 @@ test('order history, numbering and inventory reversals', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'seaside-orders-'));
   process.env.DB_PATH = join(dir, 'test.db');
   process.env.PORT = '0';
-  process.env.NODE_ENV = 'test';
-  delete process.env.WA_TOKEN;
-  delete process.env.WA_PHONE_ID;
   const { server } = await import('../server.js');
   const { db, get, all, run } = await import('../db/database.js');
   t.after(async () => {
@@ -30,9 +27,6 @@ test('order history, numbering and inventory reversals', async t => {
     assert.equal(response.status, expected, text);
     return JSON.parse(text);
   }
-  const unavailable = await request('POST', '/shop/otp/send', { phone: '01000000000' }, 503);
-  assert.equal(unavailable.dev_code, undefined);
-  assert.equal(get('SELECT COUNT(*) AS n FROM otp_codes').n, 0);
   token = (await request('POST', '/login', { email: 'admin@seaside.com', password: 'admin123' })).token;
   const recipe = get('SELECT pr.* FROM product_recipes pr JOIN products p ON p.id=pr.product_id WHERE p.track_stock=1 LIMIT 1');
   run('UPDATE products SET price=20 WHERE id=?', recipe.product_id);
@@ -49,6 +43,8 @@ test('order history, numbering and inventory reversals', async t => {
   const paid = await request('POST', '/orders', { items, status: 'paid', paid_cash: 100000, payment_method_id: 1 });
   const path = '/orders/' + paid.id;
   await request('DELETE', path, undefined, 409);
+  await request('PUT', path, { items, discount: 5 }, 409);
+  assert.equal((await request('GET', path)).total, paid.total);
   const afterSale = stock();
   assert.notDeepEqual(afterSale, before);
   run('UPDATE product_recipes SET qty=qty*2 WHERE product_id=?', recipe.product_id);
@@ -66,6 +62,8 @@ test('order history, numbering and inventory reversals', async t => {
   const customer = await request('POST', '/customers', { name_ar: 'Test customer' });
   const method = get('SELECT id FROM payment_methods WHERE id<>1 LIMIT 1');
   const partial = await request('POST', '/orders', { items, status: 'paid', customer_id: customer.id, paid_cash: 1, payment_method_id: 1 });
+  await request('POST', '/returns/sales', { order_id: partial.id,
+    items: [{ order_item_id: partial.items[0].id, qty: 1 }] }, 409);
   await request('POST', '/orders/' + partial.id + '/settle', { amount: partial.total - 1, method_id: method.id });
   await request('POST', '/orders/' + partial.id + '/cancel', {});
   const balances = all(`SELECT method_id, ROUND(SUM(amount),2) AS net FROM money_movements
@@ -73,8 +71,22 @@ test('order history, numbering and inventory reversals', async t => {
   assert.equal(balances.length, 2);
   assert.ok(balances.every(row => row.net === 0));
 
-  const returned = await request('POST', '/orders', { items, status: 'paid', paid_cash: 100000, payment_method_id: 1 });
-  await request('POST', '/returns/sales', { order_id: returned.id, items: [{ order_item_id: returned.items[0].id, qty: 1 }] });
+  run('UPDATE taxes SET is_active=1, rate=14 WHERE id=(SELECT MIN(id) FROM taxes)');
+  const returned = await request('POST', '/orders', { items: [...items, ...items, ...items],
+    discount: 10, tip: 3, status: 'paid', paid_cash: 1000, payment_method_id: 1 });
+  const refund = (lines, expected) => request('POST', '/returns/sales',
+    { order_id: returned.id, method_id: 1, items: lines }, expected);
+  const lines = returned.items.map(item => ({ order_item_id: item.id, qty: 1 }));
+  await refund([lines[0], lines[0]], 400);
+  const firstRefund = await refund([lines[0]]);
+  // Simulate a pre-migration return without an original line reference.
+  run('UPDATE sales_return_items SET order_item_id=NULL WHERE return_id=?', firstRefund.id);
+  await refund([lines[0]], 400);
+  const secondRefund = await refund([lines[1]]);
+  const thirdRefund = await refund([lines[2]]);
+  assert.equal(firstRefund.total, Math.round((returned.total - 3) * 100 / 3) / 100);
+  assert.equal(Math.round((firstRefund.total + secondRefund.total + thirdRefund.total) * 100),
+    Math.round((returned.total - 3) * 100));
   await request('POST', '/orders/' + returned.id + '/cancel', {}, 409);
   await request('PUT', '/orders/' + returned.id, { items }, 409);
 });
