@@ -4,7 +4,7 @@
 // ===================================================================
 import express from 'express';
 import bcrypt from 'bcryptjs';
-import { randomInt, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, basename } from 'node:path';
 import { existsSync, mkdirSync, readdirSync, statSync, copyFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -576,18 +576,19 @@ app.put('/api/orders/:id', auth, perm('edit_orders'), (req, res) => {
     return { product_id: p.id, name_ar: p.name_ar, qty: +i.qty, price: p.price, cost: p.cost, note: i.note || null };
   });
   const discount = b.discount !== undefined ? +b.discount : o.discount;
-  const tot = computeTotals(prepared, discount);
+  const tot = computeTotals(prepared, discount + (o.points_discount || 0));
   const wasPaid = o.status === 'paid';
+  const tip = b.tip !== undefined ? +b.tip : o.tip;
+  const total = +(tot.total + tip).toFixed(2);
+  if (wasPaid && total !== o.total)
+    return res.status(409).json({ error: 'تغيير إجمالي فاتورة مسجّل دفعها يحتاج إلى إلغاء وإصدار فاتورة مصحّحة' });
   tx(() => {
     if (wasPaid) restockOrder(o.id);                      // عكس الخصم القديم
     run('DELETE FROM order_items WHERE order_id=?', o.id);
     prepared.forEach(p => run('INSERT INTO order_items(order_id,product_id,name_ar,qty,price,cost,note,kds_status) VALUES(?,?,?,?,?,?,?,?)',
       o.id, p.product_id, p.name_ar, p.qty, p.price, p.cost, p.note, 'served'));
-    const tip = b.tip !== undefined ? +b.tip : o.tip;
-    const total = +(tot.total + tip).toFixed(2);
-    const change = wasPaid ? +(((o.paid_cash || 0) - total) > 0 ? (o.paid_cash - total) : 0).toFixed(2) : o.change_due;
-    run('UPDATE orders SET subtotal=?,discount=?,tax=?,tip=?,total=?,cost_total=?,change_due=?,tax_detail=? WHERE id=?',
-      tot.subtotal, discount, tot.tax, tip, total, tot.cost, change, JSON.stringify(tot.taxes), o.id);
+    run('UPDATE orders SET subtotal=?,discount=?,tax=?,tip=?,total=?,cost_total=?,tax_detail=? WHERE id=?',
+      tot.subtotal, discount, tot.tax, tip, total, tot.cost, JSON.stringify(tot.taxes), o.id);
     if (wasPaid) backflushOrder(o.id);                    // تطبيق الخصم الجديد
   });
   logAudit(req.user.id, 'order', o.id, 'edit_paid', { by: req.user.full_name });
@@ -1546,34 +1547,56 @@ app.get('/api/returns/sales/:id', auth, admin, (req, res) => {
 // إنشاء مرتجع مبيعات: بنود من فاتورة أصلية، بكميات لا تتجاوز المباع (ناقص المرتجع سابقاً)
 app.post('/api/returns/sales', auth, (req, res) => {
   const b = req.body || {};
-  const o = get('SELECT * FROM orders WHERE id=?', b.order_id);
-  if (!o || o.status !== 'paid') return res.status(400).json({ error: 'اختر فاتورة مدفوعة' });
-  const lines = (b.items || []).filter(i => i.order_item_id && +i.qty > 0);
-  if (!lines.length) return res.status(400).json({ error: 'حدد أصنافاً للإرجاع' });
+  if (!Array.isArray(b.items) || !b.items.length)
+    return res.status(400).json({ error: 'حدد أصنافاً للإرجاع' });
   const restock = b.restock === 0 || b.restock === false ? 0 : 1;
   const shift = openShiftOf(req.user.id);
   const t = nowISO();
-
-  const prepared = lines.map(l => {
-    const oi = get('SELECT * FROM order_items WHERE id=? AND order_id=?', l.order_item_id, o.id);
-    if (!oi) throw new Error('بند غير موجود بالفاتورة');
-    const returnedBefore = get(`SELECT COALESCE(SUM(sri.qty),0) q FROM sales_return_items sri
-      JOIN sales_returns sr ON sr.id=sri.return_id WHERE sr.order_id=? AND sri.product_id IS ?`, o.id, oi.product_id).q;
-    const maxQty = Math.max(0, oi.qty - returnedBefore);
-    const qty = Math.min(+l.qty, maxQty);
-    if (qty <= 0) throw new Error(`الكمية المرتجعة تتجاوز المتاح للصنف: ${oi.name_ar}`);
-    return { oi, qty };
-  });
-  const total = +prepared.reduce((s, x) => s + x.qty * x.oi.price, 0).toFixed(2);
-  const no = genDocNo('sales_returns', 'return_no', 'SRT');
-
-  const id = tx(() => {
+  const result = tx(() => {
+    const o = get('SELECT * FROM orders WHERE id=?', b.order_id ?? null);
+    if (!o || o.status !== 'paid') return { status: 400, error: 'اختر فاتورة مدفوعة' };
+    if (o.payment_status !== 'paid' || o.paid_amount < o.total)
+      return { status: 409, error: 'رد المبلغ يتطلب تسوية الفاتورة أولاً' };
+    const sold = all('SELECT * FROM order_items WHERE order_id=? ORDER BY id', o.id);
+    const previous = all(`SELECT ri.* FROM sales_return_items ri JOIN sales_returns sr ON sr.id=ri.return_id
+      WHERE sr.order_id=? ORDER BY ri.id`, o.id);
+    const available = new Map(sold.map(line => [line.id, line.qty]));
+    for (const prior of previous) {
+      // Older rows recorded the product and price but omitted the original line ID.
+      const matches = prior.order_item_id == null
+        ? sold.filter(line => line.product_id === prior.product_id && line.price === prior.price)
+        : sold.filter(line => line.id === prior.order_item_id);
+      let left = prior.qty;
+      for (const line of matches) {
+        const used = Math.min(left, available.get(line.id));
+        available.set(line.id, available.get(line.id) - used);
+        left -= used;
+      }
+    }
+    const prepared = [];
+    for (const line of b.items) {
+      const oi = sold.find(item => item.id === Number(line?.order_item_id));
+      const qty = Number(line?.qty);
+      if (!oi || !Number.isFinite(qty) || qty <= 0 || qty > available.get(oi.id))
+        return { error: 'بند المرتجع أو كميته غير صالح، تحقّق من الكمية المتاحة' };
+      available.set(oi.id, available.get(oi.id) - qty);
+      prepared.push({ oi, qty });
+    }
+    const gross = sold.reduce((sum, item) => sum + item.price * item.qty, 0);
+    const priorGross = previous.reduce((sum, item) => sum + item.price * item.qty, 0);
+    const batchGross = prepared.reduce((sum, item) => sum + item.oi.price * item.qty, 0);
+    const netCents = Math.max(0, Math.round((o.total - o.tip) * 100));
+    const allocated = value => gross ? Math.round(netCents * value / gross) : 0;
+    const refunded = get('SELECT COALESCE(SUM(total),0) AS amount FROM sales_returns WHERE order_id=?', o.id);
+    const remainingCents = netCents - Math.round(refunded.amount * 100);
+    const total = Math.max(0, Math.min(remainingCents, allocated(priorGross + batchGross) - allocated(priorGross))) / 100;
+    const no = genDocNo('sales_returns', 'return_no', 'SRT');
     const rid = run(`INSERT INTO sales_returns(return_no,order_id,customer_id,total,method_id,reason,restock,shift_id,created_by,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?)`, no, o.id, o.customer_id, total, b.method_id || null, b.reason || null,
       restock, shift?.id || null, req.user.id, t).lastInsertRowid;
     prepared.forEach(({ oi, qty }) => {
-      run('INSERT INTO sales_return_items(return_id,product_id,name_ar,qty,price,cost) VALUES(?,?,?,?,?,?)',
-        rid, oi.product_id, oi.name_ar, qty, oi.price, oi.cost);
+      run('INSERT INTO sales_return_items(return_id,order_item_id,product_id,name_ar,qty,price,cost) VALUES(?,?,?,?,?,?,?)',
+        rid, oi.id, oi.product_id, oi.name_ar, qty, oi.price, oi.cost);
       // إرجاع مكونات الوصفة للمخزن (بنسبة الكمية المرتجعة)
       if (restock && oi.product_id) {
         const recipe = all(`SELECT pr.material_id, pr.qty, m.warehouse_id, m.avg_cost FROM product_recipes pr
@@ -1592,10 +1615,12 @@ app.post('/api/returns/sales', auth, (req, res) => {
     // رد المبلغ من الخزينة
     if (b.method_id && total > 0) moneyMove({ method_id: b.method_id, amount: -total, ref_type: 'sales_return',
       ref_id: rid, note: `مرتجع مبيعات ${no} (${o.invoice_no})`, user_id: req.user.id, shift_id: shift?.id || null });
-    return rid;
+    logAudit(req.user.id, 'sales_return', rid, 'create', { total });
+    notify({ role_key: 'admin', type: 'system', icon: '↩️', title: `مرتجع مبيعات ${no}`, body: `قيمة ${total} من ${o.invoice_no}`, ref_type: 'sales_return', ref_id: rid });
+    return { id: rid, no, total };
   });
-  logAudit(req.user.id, 'sales_return', id, 'create', { total });
-  notify({ role_key: 'admin', type: 'system', icon: '↩️', title: `مرتجع مبيعات ${no}`, body: `قيمة ${total} من ${o.invoice_no}`, ref_type: 'sales_return', ref_id: id });
+  if (result.error) return res.status(result.status || 400).json({ error: result.error });
+  const { id, no, total } = result;
   res.json({ id, return_no: no, total });
 });
 
@@ -1782,13 +1807,11 @@ app.get('/api/public/menu', (req, res) => {
 // ===================================================================
 //  حسابات العملاء (المتجر): تسجيل دخول بالموبايل + OTP واتساب
 // ===================================================================
-const genOTP = () => String(randomInt(1000, 10000));   // 4 أرقام
+const genOTP = () => String(Math.floor(1000 + Math.random() * 9000));   // 4 أرقام
 // إرسال كود التحقق
 app.post('/api/shop/otp/send', async (req, res) => {
   const phone = (req.body?.phone || '').trim();
   if (!/^0?1[0-9]{9}$/.test(phone.replace(/\s/g, ''))) return res.status(400).json({ error: 'أدخل رقم موبايل مصري صحيح (11 رقم)' });
-  if (!waConnected() && process.env.NODE_ENV !== 'development')
-    return res.status(503).json({ error: 'خدمة إرسال كود التحقق غير متاحة حالياً' });
   // حد إرسال: كود واحد كل 45 ثانية لنفس الرقم
   const recent = get(`SELECT created_at FROM otp_codes WHERE phone=? ORDER BY id DESC LIMIT 1`, phone);
   if (recent && (Date.now() - new Date(recent.created_at).getTime()) < 45e3)
@@ -1796,13 +1819,9 @@ app.post('/api/shop/otp/send', async (req, res) => {
   const code = genOTP();
   const expires = new Date(Date.now() + 5 * 60e3).toISOString();
   run('DELETE FROM otp_codes WHERE phone=?', phone);   // كود واحد فعّال لكل رقم
-  const otpId = run('INSERT INTO otp_codes(phone,code,expires_at,created_at) VALUES(?,?,?,?)', phone, code, expires, nowISO()).lastInsertRowid;
+  run('INSERT INTO otp_codes(phone,code,expires_at,created_at) VALUES(?,?,?,?)', phone, code, expires, nowISO());
   const s = settingsObj();
   const wa = await sendWhatsApp(phone, `${s.cafe_name || 'المتجر'}\nكود تفعيل حسابك: ${code}\nصالح لمدة 5 دقائق. لا تشاركه مع أحد.`);
-  if (!wa.ok && !wa.dev) {
-    run('DELETE FROM otp_codes WHERE id=?', otpId);
-    return res.status(502).json({ error: 'تعذّر إرسال كود التحقق، حاول مرة أخرى' });
-  }
   if (wa.dev) LAST_DEV_OTP = { phone, code };
   // في وضع التطوير نُرجع الكود ليجربه المطوّر؛ في الإنتاج (واتساب متصل) لا نُرجعه
   res.json({ sent: true, dev: !!wa.dev, ...(wa.dev ? { dev_code: code } : {}) });
