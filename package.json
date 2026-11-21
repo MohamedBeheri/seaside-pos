@@ -8,6 +8,7 @@
     "node": ">=22.5.0"
   },
   "scripts": {
+    "test": "node --test",
     "start": "node server.js",
     "seed": "node db/seed.js",
     "reset": "node db/seed.js --reset"

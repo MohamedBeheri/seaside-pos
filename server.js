@@ -139,7 +139,9 @@ function logPoints(customer_id, points, kind, note, ref_type, ref_id, by) {
 // مولّد أرقام مستندات موحّد: RCP-2026-0001 ...
 function genDocNo(table, col, prefix) {
   const year = nowISO().slice(0, 4);
-  const n = get(`SELECT COUNT(*) c FROM ${table} WHERE ${col} LIKE ?`, `${prefix}-${year}-%`).c + 1;
+  const stem = `${prefix}-${year}-`;
+  const { n } = get(`SELECT COALESCE(MAX(CAST(substr(${col}, ?) AS INTEGER)), 0) + 1 AS n
+    FROM ${table} WHERE ${col} LIKE ?`, stem.length + 1, stem + '%');
   return `${prefix}-${year}-${String(n).padStart(4, '0')}`;
 }
 
@@ -175,19 +177,18 @@ function backflushOrder(orderId) {
 }
 // عكس الخصم (إرجاع المكونات للمخزن) — عند تعديل/إلغاء فاتورة مدفوعة
 function restockOrder(orderId) {
-  const items = all('SELECT oi.*, p.track_stock FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=?', orderId);
+  // Include prior reversals so repeated edits restore only the outstanding movement.
+  const movements = all(`SELECT material_id, warehouse_id, unit_cost, -ROUND(SUM(qty), 4) AS quantity
+    FROM inventory_transactions
+    WHERE ref_type='order' AND ref_id=? AND type IN ('sale', 'adjust')
+    GROUP BY material_id, warehouse_id, unit_cost HAVING ROUND(SUM(qty), 4) <> 0`, orderId);
   const t = nowISO();
-  for (const it of items) {
-    if (!it.product_id || it.track_stock === 0) continue;
-    const recipe = all('SELECT pr.material_id, pr.qty, m.warehouse_id, m.avg_cost FROM product_recipes pr JOIN raw_materials m ON m.id=pr.material_id WHERE pr.product_id=?', it.product_id);
-    for (const r of recipe) {
-      const back = r.qty * it.qty;
-      const mat = get('SELECT qty FROM raw_materials WHERE id=?', r.material_id);
-      const bal = +(mat.qty + back).toFixed(4);
-      run('UPDATE raw_materials SET qty=? WHERE id=?', bal, r.material_id);
-      run(`INSERT INTO inventory_transactions(material_id,warehouse_id,type,qty,unit_cost,balance,ref_type,ref_id,note,created_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?)`, r.material_id, r.warehouse_id, 'adjust', back, r.avg_cost, bal, 'order', orderId, 'إرجاع تعديل فاتورة: ' + it.name_ar, t);
-    }
+  for (const movement of movements) {
+    const { material_id, warehouse_id, unit_cost, quantity } = movement;
+    const { qty: balance } = get('UPDATE raw_materials SET qty=ROUND(qty+?,4) WHERE id=? RETURNING qty', quantity, material_id);
+    run(`INSERT INTO inventory_transactions(material_id,warehouse_id,type,qty,unit_cost,balance,ref_type,ref_id,note,created_at)
+      VALUES(?,?,'adjust',?,?,?,'order',?,?,?)`, material_id, warehouse_id, quantity, unit_cost,
+      balance, orderId, 'عكس حركة مخزون الفاتورة', t);
   }
 }
 
@@ -323,9 +324,7 @@ app.get('/api/pos/products', auth, (_q, res) => {
 });
 
 function genInvoiceNo() {
-  const year = nowISO().slice(0, 4);
-  const n = get("SELECT COUNT(*) c FROM orders WHERE invoice_no LIKE ?", 'INV-' + year + '-%').c + 1;
-  return `INV-${year}-${String(n).padStart(4, '0')}`;
+  return genDocNo('orders', 'invoice_no', 'INV');
 }
 
 // الضرائب المفعّلة (قيمة مضافة / خدمة / ...) — تُحسب كلٌّ منها على الوعاء بعد الخصم
@@ -450,7 +449,7 @@ app.get('/api/orders', auth, (req, res) => {
     f.push(` AND (UPPER(REPLACE(REPLACE(o.invoice_no,'-',''),' ','')) LIKE ? OR o.id=? OR t.name_ar LIKE ? OR c.name_ar LIKE ? OR c.phone LIKE ?)`);
     p.push('%' + norm + '%', +raw || 0, '%' + raw + '%', '%' + raw + '%', '%' + raw + '%');
   }
-  res.json(all(`SELECT o.id,o.invoice_no,o.order_type,o.status,o.total,o.created_at,o.guests,o.source,o.qr_name,
+  res.json(all(`SELECT o.id,o.invoice_no,o.order_type,o.status,o.total,o.created_at,o.paid_at,o.guests,o.source,o.qr_name,
     o.paid_amount,o.payment_status,ROUND(o.total-o.paid_amount,2) remaining,
     t.name_ar table_name, pm.name_ar payment_name, c.name_ar customer_name FROM orders o
     LEFT JOIN tables t ON t.id=o.table_id LEFT JOIN payment_methods pm ON pm.id=o.payment_method_id
@@ -467,6 +466,8 @@ app.get('/api/orders/:id', auth, (req, res) => {
 app.delete('/api/orders/:id', auth, perm('delete_orders'), (req, res) => {
   const o = get('SELECT * FROM orders WHERE id=?', req.params.id);
   if (!o) return res.status(404).json({ error: 'الطلب غير موجود' });
+  if (o.status === 'paid' || o.paid_at)
+    return res.status(409).json({ error: 'يجب الاحتفاظ بالفاتورة التي سُجّل دفعها وبحركاتها' });
   tx(() => {
     run('DELETE FROM order_items WHERE order_id=?', o.id);
     run('DELETE FROM orders WHERE id=?', o.id);
@@ -535,14 +536,21 @@ app.post('/api/orders/:id/settle', auth, (req, res) => {
 app.post('/api/orders/:id/cancel', auth, (req, res) => {
   const o = get('SELECT * FROM orders WHERE id=?', req.params.id);
   if (!o) return res.status(404).json({ error: 'غير موجود' });
+  if (get('SELECT 1 FROM sales_returns WHERE order_id=? LIMIT 1', o.id))
+    return res.status(409).json({ error: 'الفاتورة مرتبطة بمرتجع مبيعات ولا يمكن تعديلها أو إلغاؤها' });
   if (o.status === 'paid') { const rp = JSON.parse(get('SELECT permissions FROM roles WHERE id=?', req.user.role_id)?.permissions || '[]'); if (req.user.role_key !== 'admin' && !rp.includes('edit_orders')) return res.status(400).json({ error: 'لا يمكن إلغاء طلب مدفوع — تحتاج صلاحية تعديل الفواتير' }); }
   tx(() => {
     if (o.status === 'paid') {
       restockOrder(o.id);   // أدمن يلغي فاتورة مدفوعة → إرجاع المخزون
       // عكس الحركة المالية والنقاط
-      if (o.paid_amount > 0 && o.payment_method_id) moneyMove({ method_id: o.payment_method_id, amount: -o.paid_amount,
-        ref_type: 'order', ref_id: o.id, note: `إلغاء فاتورة ${o.invoice_no}`, user_id: req.user.id,
-        shift_id: openShiftOf(req.user.id)?.id || null });
+      const collections = all(`SELECT method_id, ROUND(SUM(amount),2) amount FROM money_movements
+        WHERE ref_id=? AND amount>0 AND ref_type IN ('order','invoice_payment')
+        GROUP BY method_id`, o.id); // Purchase settlements with the same numeric ID are debits.
+      const shiftId = openShiftOf(req.user.id)?.id || null;
+      for (const collection of collections) {
+        moneyMove({ method_id: collection.method_id, amount: -collection.amount, ref_type: 'order',
+          ref_id: o.id, note: `إلغاء فاتورة ${o.invoice_no}`, user_id: req.user.id, shift_id: shiftId });
+      }
       if (o.customer_id && o.points_earned > 0) logPoints(o.customer_id, -o.points_earned, 'manual_remove', 'إلغاء فاتورة', 'order', o.id, req.user.id);
       if (o.customer_id && o.points_used > 0) logPoints(o.customer_id, +o.points_used, 'manual_add', 'إلغاء فاتورة — استرداد نقاط', 'order', o.id, req.user.id);
     }
@@ -556,6 +564,8 @@ app.post('/api/orders/:id/cancel', auth, (req, res) => {
 app.put('/api/orders/:id', auth, perm('edit_orders'), (req, res) => {
   const o = get('SELECT * FROM orders WHERE id=?', req.params.id);
   if (!o) return res.status(404).json({ error: 'الطلب غير موجود' });
+  if (get('SELECT 1 FROM sales_returns WHERE order_id=? LIMIT 1', o.id))
+    return res.status(409).json({ error: 'الفاتورة مرتبطة بمرتجع مبيعات ولا يمكن تعديلها أو إلغاؤها' });
   if (o.status === 'cancelled') return res.status(400).json({ error: 'الطلب ملغي' });
   const b = req.body || {};
   const items = (b.items || []).filter(i => i.product_id && i.qty > 0);
@@ -566,18 +576,19 @@ app.put('/api/orders/:id', auth, perm('edit_orders'), (req, res) => {
     return { product_id: p.id, name_ar: p.name_ar, qty: +i.qty, price: p.price, cost: p.cost, note: i.note || null };
   });
   const discount = b.discount !== undefined ? +b.discount : o.discount;
-  const tot = computeTotals(prepared, discount);
+  const tot = computeTotals(prepared, discount + (o.points_discount || 0));
   const wasPaid = o.status === 'paid';
+  const tip = b.tip !== undefined ? +b.tip : o.tip;
+  const total = +(tot.total + tip).toFixed(2);
+  if (wasPaid && total !== o.total)
+    return res.status(409).json({ error: 'تغيير إجمالي فاتورة مسجّل دفعها يحتاج إلى إلغاء وإصدار فاتورة مصحّحة' });
   tx(() => {
     if (wasPaid) restockOrder(o.id);                      // عكس الخصم القديم
     run('DELETE FROM order_items WHERE order_id=?', o.id);
     prepared.forEach(p => run('INSERT INTO order_items(order_id,product_id,name_ar,qty,price,cost,note,kds_status) VALUES(?,?,?,?,?,?,?,?)',
       o.id, p.product_id, p.name_ar, p.qty, p.price, p.cost, p.note, 'served'));
-    const tip = b.tip !== undefined ? +b.tip : o.tip;
-    const total = +(tot.total + tip).toFixed(2);
-    const change = wasPaid ? +(((o.paid_cash || 0) - total) > 0 ? (o.paid_cash - total) : 0).toFixed(2) : o.change_due;
-    run('UPDATE orders SET subtotal=?,discount=?,tax=?,tip=?,total=?,cost_total=?,change_due=?,tax_detail=? WHERE id=?',
-      tot.subtotal, discount, tot.tax, tip, total, tot.cost, change, JSON.stringify(tot.taxes), o.id);
+    run('UPDATE orders SET subtotal=?,discount=?,tax=?,tip=?,total=?,cost_total=?,tax_detail=? WHERE id=?',
+      tot.subtotal, discount, tot.tax, tip, total, tot.cost, JSON.stringify(tot.taxes), o.id);
     if (wasPaid) backflushOrder(o.id);                    // تطبيق الخصم الجديد
   });
   logAudit(req.user.id, 'order', o.id, 'edit_paid', { by: req.user.full_name });
@@ -1536,34 +1547,56 @@ app.get('/api/returns/sales/:id', auth, admin, (req, res) => {
 // إنشاء مرتجع مبيعات: بنود من فاتورة أصلية، بكميات لا تتجاوز المباع (ناقص المرتجع سابقاً)
 app.post('/api/returns/sales', auth, (req, res) => {
   const b = req.body || {};
-  const o = get('SELECT * FROM orders WHERE id=?', b.order_id);
-  if (!o || o.status !== 'paid') return res.status(400).json({ error: 'اختر فاتورة مدفوعة' });
-  const lines = (b.items || []).filter(i => i.order_item_id && +i.qty > 0);
-  if (!lines.length) return res.status(400).json({ error: 'حدد أصنافاً للإرجاع' });
+  if (!Array.isArray(b.items) || !b.items.length)
+    return res.status(400).json({ error: 'حدد أصنافاً للإرجاع' });
   const restock = b.restock === 0 || b.restock === false ? 0 : 1;
   const shift = openShiftOf(req.user.id);
   const t = nowISO();
-
-  const prepared = lines.map(l => {
-    const oi = get('SELECT * FROM order_items WHERE id=? AND order_id=?', l.order_item_id, o.id);
-    if (!oi) throw new Error('بند غير موجود بالفاتورة');
-    const returnedBefore = get(`SELECT COALESCE(SUM(sri.qty),0) q FROM sales_return_items sri
-      JOIN sales_returns sr ON sr.id=sri.return_id WHERE sr.order_id=? AND sri.product_id IS ?`, o.id, oi.product_id).q;
-    const maxQty = Math.max(0, oi.qty - returnedBefore);
-    const qty = Math.min(+l.qty, maxQty);
-    if (qty <= 0) throw new Error(`الكمية المرتجعة تتجاوز المتاح للصنف: ${oi.name_ar}`);
-    return { oi, qty };
-  });
-  const total = +prepared.reduce((s, x) => s + x.qty * x.oi.price, 0).toFixed(2);
-  const no = genDocNo('sales_returns', 'return_no', 'SRT');
-
-  const id = tx(() => {
+  const result = tx(() => {
+    const o = get('SELECT * FROM orders WHERE id=?', b.order_id ?? null);
+    if (!o || o.status !== 'paid') return { status: 400, error: 'اختر فاتورة مدفوعة' };
+    if (o.payment_status !== 'paid' || o.paid_amount < o.total)
+      return { status: 409, error: 'رد المبلغ يتطلب تسوية الفاتورة أولاً' };
+    const sold = all('SELECT * FROM order_items WHERE order_id=? ORDER BY id', o.id);
+    const previous = all(`SELECT ri.* FROM sales_return_items ri JOIN sales_returns sr ON sr.id=ri.return_id
+      WHERE sr.order_id=? ORDER BY ri.id`, o.id);
+    const available = new Map(sold.map(line => [line.id, line.qty]));
+    for (const prior of previous) {
+      // Older rows recorded the product and price but omitted the original line ID.
+      const matches = prior.order_item_id == null
+        ? sold.filter(line => line.product_id === prior.product_id && line.price === prior.price)
+        : sold.filter(line => line.id === prior.order_item_id);
+      let left = prior.qty;
+      for (const line of matches) {
+        const used = Math.min(left, available.get(line.id));
+        available.set(line.id, available.get(line.id) - used);
+        left -= used;
+      }
+    }
+    const prepared = [];
+    for (const line of b.items) {
+      const oi = sold.find(item => item.id === Number(line?.order_item_id));
+      const qty = Number(line?.qty);
+      if (!oi || !Number.isFinite(qty) || qty <= 0 || qty > available.get(oi.id))
+        return { error: 'بند المرتجع أو كميته غير صالح، تحقّق من الكمية المتاحة' };
+      available.set(oi.id, available.get(oi.id) - qty);
+      prepared.push({ oi, qty });
+    }
+    const gross = sold.reduce((sum, item) => sum + item.price * item.qty, 0);
+    const priorGross = previous.reduce((sum, item) => sum + item.price * item.qty, 0);
+    const batchGross = prepared.reduce((sum, item) => sum + item.oi.price * item.qty, 0);
+    const netCents = Math.max(0, Math.round((o.total - o.tip) * 100));
+    const allocated = value => gross ? Math.round(netCents * value / gross) : 0;
+    const refunded = get('SELECT COALESCE(SUM(total),0) AS amount FROM sales_returns WHERE order_id=?', o.id);
+    const remainingCents = netCents - Math.round(refunded.amount * 100);
+    const total = Math.max(0, Math.min(remainingCents, allocated(priorGross + batchGross) - allocated(priorGross))) / 100;
+    const no = genDocNo('sales_returns', 'return_no', 'SRT');
     const rid = run(`INSERT INTO sales_returns(return_no,order_id,customer_id,total,method_id,reason,restock,shift_id,created_by,created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?)`, no, o.id, o.customer_id, total, b.method_id || null, b.reason || null,
       restock, shift?.id || null, req.user.id, t).lastInsertRowid;
     prepared.forEach(({ oi, qty }) => {
-      run('INSERT INTO sales_return_items(return_id,product_id,name_ar,qty,price,cost) VALUES(?,?,?,?,?,?)',
-        rid, oi.product_id, oi.name_ar, qty, oi.price, oi.cost);
+      run('INSERT INTO sales_return_items(return_id,order_item_id,product_id,name_ar,qty,price,cost) VALUES(?,?,?,?,?,?,?)',
+        rid, oi.id, oi.product_id, oi.name_ar, qty, oi.price, oi.cost);
       // إرجاع مكونات الوصفة للمخزن (بنسبة الكمية المرتجعة)
       if (restock && oi.product_id) {
         const recipe = all(`SELECT pr.material_id, pr.qty, m.warehouse_id, m.avg_cost FROM product_recipes pr
@@ -1582,10 +1615,12 @@ app.post('/api/returns/sales', auth, (req, res) => {
     // رد المبلغ من الخزينة
     if (b.method_id && total > 0) moneyMove({ method_id: b.method_id, amount: -total, ref_type: 'sales_return',
       ref_id: rid, note: `مرتجع مبيعات ${no} (${o.invoice_no})`, user_id: req.user.id, shift_id: shift?.id || null });
-    return rid;
+    logAudit(req.user.id, 'sales_return', rid, 'create', { total });
+    notify({ role_key: 'admin', type: 'system', icon: '↩️', title: `مرتجع مبيعات ${no}`, body: `قيمة ${total} من ${o.invoice_no}`, ref_type: 'sales_return', ref_id: rid });
+    return { id: rid, no, total };
   });
-  logAudit(req.user.id, 'sales_return', id, 'create', { total });
-  notify({ role_key: 'admin', type: 'system', icon: '↩️', title: `مرتجع مبيعات ${no}`, body: `قيمة ${total} من ${o.invoice_no}`, ref_type: 'sales_return', ref_id: id });
+  if (result.error) return res.status(result.status || 400).json({ error: result.error });
+  const { id, no, total } = result;
   res.json({ id, return_no: no, total });
 });
 
@@ -2183,4 +2218,4 @@ app.use(express.static(join(__dirname, 'public'), { etag: true, lastModified: tr
 // منيو العميل عبر QR الطاولة (صفحة عامة مستقلة عن نظام الإدارة)
 app.get('/menu', (_q, res) => { res.setHeader('Cache-Control', 'no-cache'); res.sendFile(join(__dirname, 'public', 'menu.html')); });
 app.get('*', (_q, res) => { res.setHeader('Cache-Control', 'no-cache'); res.sendFile(join(__dirname, 'public', 'index.html')); });
-app.listen(PORT, () => console.log(`\n🌊 نظام كافيه على البحر يعمل على:  http://localhost:${PORT}\n`));
+export const server = app.listen(PORT, () => console.log(`\n🌊 نظام كافيه على البحر يعمل على:  http://localhost:${server.address().port}\n`));

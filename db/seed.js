@@ -20,6 +20,7 @@ export function migrate() {
   const addCol = (table, col, ddl) => { if (!hasCol(table, col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${ddl}`); };
 
   // الطلبات: عميل + آجل/جزئي + وردية + نقاط
+  addCol('sales_return_items', 'order_item_id', 'INTEGER REFERENCES order_items(id)');
   addCol('orders', 'customer_id',     'INTEGER REFERENCES customers(id)');
   addCol('orders', 'paid_amount',     'REAL NOT NULL DEFAULT 0');       // المحصَّل فعلاً
   addCol('orders', 'payment_status',  "TEXT NOT NULL DEFAULT 'paid'"); // paid | partial | credit

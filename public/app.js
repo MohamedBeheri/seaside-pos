@@ -588,7 +588,7 @@ ROUTES.orders = async (view) => {
     $('#o-list').innerHTML = `<div class="card"><div class="t-wrap"><table><thead><tr><th>${t('الفاتورة')}</th><th>${t('النوع')}</th><th>${t('الطاولة')}</th><th>${t('الإجمالي')}</th><th>${t('الدفع')}</th><th>${t('الحالة')}</th><th>${t('الوقت')}</th><th></th></tr></thead><tbody>
       ${rows.map(o => `<tr><td>${esc(o.invoice_no || '#' + o.id)}</td><td>${LL(TYPE, o.order_type)}</td><td>${esc(o.table_name || '—')}</td>
         <td class="t-num">${money(o.total)}</td><td>${esc(o.payment_name || '—')}</td><td>${stBadge(o.status)}</td><td style="color:var(--text3)">${dt(o.created_at)}</td>
-        <td><button class="btn btn-ghost btn-sm" data-o="${o.id}">${t('عرض')}</button>${can('delete_orders') ? `<button class="btn btn-danger btn-sm" data-del="${o.id}" style="margin-inline-start:4px">${t('حذف')}</button>` : ''}</td></tr>`).join('') || `<tr><td colspan="8" class="empty">${query ? L('لا نتائج لبحثك', 'No results for your search') : t('لا طلبات بهذا الفلتر')}</td></tr>`}
+        <td><button class="btn btn-ghost btn-sm" data-o="${o.id}">${t('عرض')}</button>${can('delete_orders') && o.status !== 'paid' && !o.paid_at ? `<button class="btn btn-danger btn-sm" data-del="${o.id}" style="margin-inline-start:4px">${t('حذف')}</button>` : ''}</td></tr>`).join('') || `<tr><td colspan="8" class="empty">${query ? L('لا نتائج لبحثك', 'No results for your search') : t('لا طلبات بهذا الفلتر')}</td></tr>`}
       </tbody></table></div></div>`;
     $$('#o-list [data-o]').forEach(b => b.onclick = () => openOrder(+b.dataset.o));
     $$('#o-list [data-del]').forEach(b => b.onclick = () => confirmDialog(L('هل أنت متأكد من حذف هذه الفاتورة نهائياً؟','Are you sure you want to permanently delete this invoice?'), async () => { await api('/orders/' + b.dataset.del, { method: 'DELETE' }); toast(L('تم حذف الفاتورة','Invoice deleted')); load(); }));
@@ -620,17 +620,16 @@ async function openOrder(id) {
 // تعديل فاتورة مدفوعة — الأدمن فقط
 async function editPaidOrder(o) {
   const prods = await api('/pos/products');
-  let lines = o.items.map(i => ({ product_id: i.product_id, name: i.name_ar, price: i.price, qty: i.qty, note: i.note || '' }));
+  let lines = o.items.map(i => ({ product_id: i.product_id, name: i.name_ar, price: prods.find(p => p.id === i.product_id)?.price ?? i.price, qty: i.qty, note: i.note || '' }));
   let discount = o.discount || 0;
   const m = modal(`<h3>✏️ ${t('تعديل الفاتورة (أدمن)')} — ${esc(o.invoice_no)}</h3>
-    <p style="color:var(--text2);font-size:13px;margin-bottom:10px">${L('عدّل الكميات أو احذف أصناف؛ النظام يصحّح المخزون تلقائياً.', 'Edit quantities or remove items; stock is corrected automatically.')}</p>
+    <p style="color:var(--text2);font-size:13px;margin-bottom:10px">${L('يمكن تصحيح البنود بنفس الإجمالي. لتغيير المبلغ، ألغِ الفاتورة وأصدر فاتورة مصحّحة.', 'You can correct items at the same total. To change the amount, cancel and reissue the invoice.')}</p>
     <div id="eo-lines"></div>
     <div class="field" style="margin-top:8px"><label>${L('أضف صنف', 'Add item')}</label><select id="eo-add"><option value="">— ${t('إضافة')} —</option>${prods.map(p => `<option value="${p.id}">${esc(p.name_ar)} — ${money(p.price)}</option>`).join('')}</select></div>
     <div class="row"><div class="field"><label>${t('خصم')}</label><input id="eo-disc" type="number" value="${discount}"></div></div>
     <div class="cost-summary"><div>${t('الإجمالي')}</div><div class="big" id="eo-total">—</div></div>
     <div class="err" id="eo-e"></div>
     <div class="modal-actions"><button class="btn btn-ghost" id="eo-x">${t('إلغاء')}</button><button class="btn btn-primary" id="eo-save">${t('حفظ تعديل الفاتورة')}</button></div>`, 'wide');
-  const taxRate = +META.settings.tax_rate || 0;
   const draw = () => {
     $('#eo-lines', m).innerHTML = lines.map((l, i) => `<div class="pu-line" style="grid-template-columns:1fr 70px 100px 34px">
       <div style="font-weight:600">${esc(l.name)}</div>
@@ -638,8 +637,9 @@ async function editPaidOrder(o) {
       <div class="t-num" style="align-self:center">${money(l.price * l.qty)}</div>
       <button class="btn btn-danger btn-sm" data-x="${i}">✕</button></div>`).join('') || `<div class="empty">${t('لا أصناف')}</div>`;
     const sub = lines.reduce((s, l) => s + l.price * l.qty, 0);
-    const taxable = Math.max(0, sub - (+$('#eo-disc', m).value || 0));
-    $('#eo-total', m).textContent = money(taxable + taxable * (taxRate / 100));
+    const taxable = Math.max(0, sub - (+$('#eo-disc', m).value || 0) - (o.points_discount || 0));
+    const tax = META.taxes.reduce((sum, tx) => sum + +(taxable * tx.rate / 100).toFixed(2), 0);
+    $('#eo-total', m).textContent = money(taxable + tax + o.tip);
     $$('#eo-lines [data-q]', m).forEach(inp => inp.oninput = () => { lines[+inp.dataset.q].qty = +inp.value || 0; draw(); });
     $$('#eo-lines [data-x]', m).forEach(b => b.onclick = () => { lines.splice(+b.dataset.x, 1); draw(); });
   };
